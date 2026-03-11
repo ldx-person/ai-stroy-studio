@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { createNovelSchema, updateNovelSchema, validateOrError } from '@/lib/validations/novel'
+import { deleteNovelFiles, isOSSAvailable } from '@/lib/oss'
 
 // GET - 获取所有小说
 export async function GET() {
@@ -102,6 +103,16 @@ export async function DELETE(request: NextRequest) {
     
     if (!id) {
       return NextResponse.json({ success: false, error: 'ID is required' }, { status: 400 })
+    }
+    
+    // 删除OSS上的所有文件
+    if (isOSSAvailable()) {
+      try {
+        await deleteNovelFiles(id)
+      } catch (error) {
+        console.error('Failed to delete OSS files:', error)
+        // 继续删除数据库记录
+      }
     }
     
     // Delete all chapters first (cascade)

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getZAI } from '@/lib/zai'
+import { callAliyunAIWithRetry, ChatMessage } from '@/lib/aliyun-ai'
 import { aiContinueSchema, validateOrError } from '@/lib/validations/novel'
 
 export async function POST(request: NextRequest) {
@@ -17,16 +17,12 @@ export async function POST(request: NextRequest) {
     // Get last 500 characters for context
     const lastContent = content.slice(-500)
     
-    // Use singleton ZAI instance
-    const zai = await getZAI()
-    
     const genreText = genre ? `这是一部${genre}小说。` : ''
     
-    const completion = await zai.chat.completions.create({
-      messages: [
-        {
-          role: 'assistant',
-          content: `你是一位专业的小说作家助手，擅长续写和创作小说内容。
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: `你是一位专业的小说作家助手，擅长续写和创作小说内容。
 ${genreText}
 请根据已有内容，自然地续写故事。要求：
 1. 保持风格一致
@@ -34,26 +30,20 @@ ${genreText}
 3. 不要重复已有内容
 4. 续写100-300字左右
 5. 只输出续写的内容，不要其他说明`
-        },
-        {
-          role: 'user',
-          content: `小说标题：${novelTitle || '未命名'}
+      },
+      {
+        role: 'user',
+        content: `小说标题：${novelTitle || '未命名'}
 章节标题：${chapterTitle || '未命名'}
 
 已有内容（最后部分）：
 ${lastContent}
 
 请续写接下来的内容：`
-        }
-      ],
-      thinking: { type: 'disabled' }
-    })
+      }
+    ]
     
-    const suggestion = completion.choices[0]?.message?.content
-    
-    if (!suggestion) {
-      return NextResponse.json({ success: false, error: 'AI failed to generate content' }, { status: 500 })
-    }
+    const suggestion = await callAliyunAIWithRetry(messages, 3, 2000)
     
     return NextResponse.json({ success: true, suggestion })
   } catch (error) {

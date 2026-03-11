@@ -60,6 +60,25 @@ export const aiTitleSchema = z.object({
   content: z.string().min(50, '内容至少50个字符才能生成标题').max(10000, '内容最多10000个字符')
 })
 
+// AI generate outline schema
+export const aiGenerateOutlineSchema = z.object({
+  title: z.string().trim().min(1, '小说标题不能为空').max(100, '标题最多100个字符'),
+  description: z.string().trim().min(20, '简介至少需要20个字符').max(2000, '简介最多2000个字符'),
+  genre: z.string().max(50).optional().nullable(),
+  totalWords: z.number().int().min(1000, '总字数至少1000字').max(1000000, '总字数最多100万字'),
+  chapterCount: z.number().int().min(3, '章节数至少3章').max(500, '章节数最多500章')
+})
+
+// AI generate chapter content schema
+export const aiGenerateChapterSchema = z.object({
+  novelId: z.string().min(1, '小说ID不能为空'),
+  chapterIndex: z.number().int().min(0),
+  chapterTitle: z.string().min(1, '章节标题不能为空'),
+  chapterOutline: z.string().min(1, '章节大纲不能为空'),
+  previousContent: z.string().max(500).optional(), // 前一章结尾用于衔接
+  storyContext: z.string().max(2000) // 整体故事背景
+})
+
 // TTS schema
 export const ttsSchema = z.object({
   text: z.string().min(1, '文本不能为空').max(1024, '单次请求最多1024个字符'),

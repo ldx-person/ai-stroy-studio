@@ -12,6 +12,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
+import { Progress } from '@/components/ui/progress'
 import { 
   BookOpen, 
   Plus, 
@@ -34,7 +35,10 @@ import {
   Home,
   List,
   Settings,
-  X
+  X,
+  Wand2,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -77,6 +81,24 @@ interface TextChunk {
   index: number
   text: string
   length: number
+}
+
+// Chapter outline type
+interface ChapterOutline {
+  index: number
+  title: string
+  outline: string
+  estimatedWords: number
+}
+
+// Story outline type
+interface StoryOutline {
+  beginning: string
+  middle: string
+  ending: string
+  chapters: ChapterOutline[]
+  totalWords: number
+  chapterCount: number
 }
 
 // Voice options
@@ -122,6 +144,15 @@ export default function NovelWriterApp() {
   const [showChapterSheet, setShowChapterSheet] = useState(false)
   const [activeTab, setActiveTab] = useState('write')
   
+  // Smart generation states
+  const [showSmartGenerate, setShowSmartGenerate] = useState(false)
+  const [smartGenNovel, setSmartGenNovel] = useState<Novel | null>(null)
+  const [smartGenSettings, setSmartGenSettings] = useState({ totalWords: 10000, chapterCount: 10 })
+  const [isGeneratingOutline, setIsGeneratingOutline] = useState(false)
+  const [generatedOutline, setGeneratedOutline] = useState<StoryOutline | null>(null)
+  const [isGeneratingChapters, setIsGeneratingChapters] = useState(false)
+  const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0, currentTitle: '' })
+  
   const { toast } = useToast()
 
   // Detect mobile
@@ -154,7 +185,6 @@ export default function NovelWriterApp() {
   // Cleanup audio on unmount
   useEffect(() => {
     return () => {
-      // Clean up audio element
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current.src = ''
@@ -162,7 +192,6 @@ export default function NovelWriterApp() {
         audioRef.current.onerror = null
         audioRef.current = null
       }
-      // Clean up blob URL
       if (currentAudioUrlRef.current) {
         URL.revokeObjectURL(currentAudioUrlRef.current)
         currentAudioUrlRef.current = null
@@ -187,7 +216,6 @@ export default function NovelWriterApp() {
       })
       const data = await res.json()
       if (data.success) {
-        // Update local state
         if (currentNovel) {
           const updatedChapters = currentNovel.chapters.map(ch => 
             ch.id === currentChapter.id ? { ...ch, content, wordCount } : ch
@@ -234,9 +262,16 @@ export default function NovelWriterApp() {
       const data = await res.json()
       if (data.success) {
         setNovels([...novels, data.novel])
+        const createdNovel = data.novel
         setNewNovel({ title: '', description: '', genre: '' })
         setIsCreatingNovel(false)
         toast({ title: '小说创建成功！' })
+        
+        // If has description, ask if user wants smart generation
+        if (createdNovel.description && createdNovel.description.length >= 20) {
+          setSmartGenNovel(createdNovel)
+          setShowSmartGenerate(true)
+        }
       }
     } catch (error) {
       toast({ title: '创建失败', variant: 'destructive' })
@@ -418,7 +453,6 @@ export default function NovelWriterApp() {
       })
       const data = await res.json()
       if (data.success && currentChapter) {
-        // Update chapter title
         const res2 = await fetch('/api/chapters', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -480,7 +514,6 @@ export default function NovelWriterApp() {
 
   // TTS Functions
   const stopTTS = useCallback(() => {
-    // Clean up audio element
     if (audioRef.current) {
       audioRef.current.pause()
       audioRef.current.src = ''
@@ -489,7 +522,6 @@ export default function NovelWriterApp() {
       audioRef.current = null
     }
     
-    // Clean up blob URL
     if (currentAudioUrlRef.current) {
       URL.revokeObjectURL(currentAudioUrlRef.current)
       currentAudioUrlRef.current = null
@@ -502,12 +534,9 @@ export default function NovelWriterApp() {
     audioUnlockedRef.current = false
   }, [])
 
-  // Unlock audio context for mobile browsers - must be called synchronously on user click
   const unlockAudio = useCallback((): Promise<boolean> => {
     return new Promise((resolve) => {
-      // Always resolve after a short timeout to prevent blocking
       const timeout = setTimeout(() => {
-        console.log('[TTS] Unlock timeout, continuing anyway')
         resolve(true)
       }, 100)
       
@@ -518,7 +547,6 @@ export default function NovelWriterApp() {
       }
       
       try {
-        // Create a short silent audio to unlock - this must be in the same call stack as user click
         const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA')
         const playPromise = silentAudio.play()
         
@@ -527,12 +555,10 @@ export default function NovelWriterApp() {
             clearTimeout(timeout)
             audioUnlockedRef.current = true
             silentAudio.pause()
-            console.log('[TTS] Audio unlocked successfully')
             resolve(true)
-          }).catch((err) => {
+          }).catch(() => {
             clearTimeout(timeout)
-            console.log('[TTS] Audio unlock failed:', err)
-            resolve(true) // Continue anyway
+            resolve(true)
           })
         } else {
           clearTimeout(timeout)
@@ -540,7 +566,7 @@ export default function NovelWriterApp() {
         }
       } catch {
         clearTimeout(timeout)
-        resolve(true) // Continue anyway
+        resolve(true)
       }
     })
   }, [])
@@ -568,7 +594,6 @@ export default function NovelWriterApp() {
       })
 
       if (!res.ok) {
-        // Try to get error message from response
         let errorMsg = 'TTS请求失败'
         try {
           const errorData = await res.json()
@@ -581,12 +606,10 @@ export default function NovelWriterApp() {
 
       const audioBlob = await res.blob()
       
-      // Check if we got a valid audio blob
       if (audioBlob.size === 0) {
         throw new Error('音频数据为空')
       }
       
-      // Clean up previous audio
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current.src = ''
@@ -594,7 +617,6 @@ export default function NovelWriterApp() {
         audioRef.current.onerror = null
       }
       
-      // Clean up previous blob URL
       if (currentAudioUrlRef.current) {
         URL.revokeObjectURL(currentAudioUrlRef.current)
       }
@@ -618,16 +640,13 @@ export default function NovelWriterApp() {
       setIsPlaying(true)
       setIsTTSLoading(false)
     } catch (error) {
-      console.error('TTS error:', error)
       const message = error instanceof Error ? error.message : '语音生成失败'
       toast({ title: message, variant: 'destructive' })
       stopTTS()
     }
   }, [textChunks, ttsVoice, ttsSpeed, stopTTS, toast])
 
-  // Play next chunk when index changes (only for subsequent chunks after first)
   useEffect(() => {
-    // Only auto-play after the first chunk (which is played directly from handlePlayTTS)
     if (isPlaying && textChunks.length > 0 && currentChunkIndex > 0) {
       playChunk(currentChunkIndex)
     }
@@ -640,7 +659,6 @@ export default function NovelWriterApp() {
       return
     }
 
-    // If already playing, pause
     if (isPlaying) {
       if (audioRef.current) {
         audioRef.current.pause()
@@ -649,13 +667,11 @@ export default function NovelWriterApp() {
       return
     }
 
-    // If paused, resume
     if (audioRef.current && textChunks.length > 0) {
       try {
         await audioRef.current.play()
         setIsPlaying(true)
       } catch {
-        // If resume fails, restart playback
         audioRef.current = null
         setTextChunks([])
         setCurrentChunkIndex(0)
@@ -664,13 +680,10 @@ export default function NovelWriterApp() {
       return
     }
 
-    // Start new playback
-    // Unlock audio context first (critical for mobile)
     unlockAudio()
     setIsTTSLoading(true)
 
     try {
-      // Get text chunks using POST to avoid URL length limit
       const res = await fetch('/api/tts', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -681,15 +694,12 @@ export default function NovelWriterApp() {
       if (data.success) {
         setTextChunks(data.chunks)
         setCurrentChunkIndex(0)
-        // Play first chunk directly (important for mobile autoplay policy)
-        // This must be called in the same call stack as user click
         await playChunk(0, data.chunks)
       } else {
         toast({ title: '文本处理失败', variant: 'destructive' })
         setIsTTSLoading(false)
       }
     } catch (error) {
-      console.error('[TTS] Play error:', error)
       toast({ title: '初始化播放失败', variant: 'destructive' })
       setIsTTSLoading(false)
     }
@@ -728,8 +738,174 @@ export default function NovelWriterApp() {
     }
   }
 
+  // Smart Generation Functions
+  const handleGenerateOutline = async () => {
+    if (!smartGenNovel?.description) {
+      toast({ title: '请先填写小说简介', variant: 'destructive' })
+      return
+    }
+    
+    setIsGeneratingOutline(true)
+    setGeneratedOutline(null)
+    
+    // 计算预估时间（每批30章约需5-8秒）
+    const estimatedBatches = Math.ceil(smartGenSettings.chapterCount / 30)
+    const estimatedSeconds = estimatedBatches * 8 + 5
+    
+    try {
+      // 使用 AbortController 设置较长的超时时间（5分钟）
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000)
+      
+      const res = await fetch('/api/ai/generate-outline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: smartGenNovel.title,
+          description: smartGenNovel.description,
+          genre: smartGenNovel.genre,
+          totalWords: smartGenSettings.totalWords,
+          chapterCount: smartGenSettings.chapterCount
+        }),
+        signal: controller.signal
+      })
+      
+      clearTimeout(timeoutId)
+      const data = await res.json()
+      if (data.success) {
+        setGeneratedOutline(data.outline)
+        toast({ title: '大纲生成成功！' })
+      } else {
+        toast({ title: data.error || '生成大纲失败', variant: 'destructive' })
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        toast({ title: '请求超时，请减少章节数量后重试', variant: 'destructive' })
+      } else {
+        toast({ title: '生成大纲失败', variant: 'destructive' })
+      }
+    }
+    setIsGeneratingOutline(false)
+  }
+
+  const handleGenerateAllChapters = async () => {
+    if (!generatedOutline || !smartGenNovel) return
+    
+    setIsGeneratingChapters(true)
+    setGenerationProgress({ current: 0, total: generatedOutline.chapters.length, currentTitle: '' })
+    
+    const storyContext = `小说标题：${smartGenNovel.title}
+类型：${smartGenNovel.genre || '未分类'}
+开头概述：${generatedOutline.beginning}
+经过概述：${generatedOutline.middle}
+结尾概述：${generatedOutline.ending}`
+    
+    let previousContent = ''
+    const createdChapters: Chapter[] = []
+    const failedChapters: number[] = []
+    
+    try {
+      for (let i = 0; i < generatedOutline.chapters.length; i++) {
+        const chapterInfo = generatedOutline.chapters[i]
+        setGenerationProgress({ 
+          current: i + 1, 
+          total: generatedOutline.chapters.length, 
+          currentTitle: chapterInfo.title 
+        })
+        
+        // Create chapter first
+        const createRes = await fetch('/api/chapters', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            novelId: smartGenNovel.id,
+            title: chapterInfo.title,
+            order: i
+          })
+        })
+        const createData = await createRes.json()
+        
+        if (!createData.success) {
+          console.error(`创建章节失败: ${chapterInfo.title}`)
+          failedChapters.push(i)
+          continue
+        }
+        
+        const newChapterData = createData.chapter
+        
+        // Generate chapter content
+        const genRes = await fetch('/api/ai/generate-chapter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            novelId: smartGenNovel.id,
+            chapterIndex: i,
+            chapterTitle: chapterInfo.title,
+            chapterOutline: chapterInfo.outline,
+            previousContent: previousContent.slice(-500),
+            storyContext
+          })
+        })
+        const genData = await genRes.json()
+        
+        if (genData.success) {
+          // Update chapter content
+          await fetch('/api/chapters', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: newChapterData.id,
+              content: genData.content,
+              wordCount: genData.wordCount
+            })
+          })
+          
+          previousContent = genData.content
+          createdChapters.push({
+            ...newChapterData,
+            content: genData.content,
+            wordCount: genData.wordCount
+          })
+        } else {
+          console.error(`生成章节内容失败: ${chapterInfo.title}`, genData.error)
+          failedChapters.push(i)
+          // 继续下一章，不中断整个流程
+        }
+        
+        // 每生成3章后暂停一下，避免速率限制
+        if ((i + 1) % 3 === 0 && i < generatedOutline.chapters.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000))
+        }
+      }
+      
+      // Update local state
+      const updatedNovel = { 
+        ...smartGenNovel, 
+        chapters: createdChapters,
+        wordCount: createdChapters.reduce((sum, ch) => sum + ch.wordCount, 0)
+      }
+      setNovels(novels.map(n => n.id === smartGenNovel.id ? updatedNovel : n))
+      
+      if (failedChapters.length > 0) {
+        toast({ 
+          title: `成功生成 ${createdChapters.length} 章，${failedChapters.length} 章失败`, 
+          variant: 'destructive' 
+        })
+      } else {
+        toast({ title: `成功生成 ${createdChapters.length} 个章节！` })
+      }
+      setShowSmartGenerate(false)
+      setGeneratedOutline(null)
+      setSmartGenNovel(null)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '生成章节失败'
+      toast({ title: message, variant: 'destructive' })
+    }
+    setIsGeneratingChapters(false)
+  }
+
   // Chapter List Component (reusable)
-  const ChapterList = ({ inSheet = false }: { inSheet?: boolean }) => (
+  const ChapterListComponent = ({ inSheet = false }: { inSheet?: boolean }) => (
     <div className={inSheet ? 'py-2' : ''}>
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-semibold">{inSheet ? '章节目录' : ''}</h3>
@@ -920,13 +1096,13 @@ export default function NovelWriterApp() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="description">简介</Label>
+                    <Label htmlFor="description">简介（20字以上可启用智能生成）</Label>
                     <Textarea
                       id="description"
-                      placeholder="简单描述你的故事..."
+                      placeholder="详细描述你的故事背景、主要人物、情节发展..."
                       value={newNovel.description}
                       onChange={(e) => setNewNovel({ ...newNovel, description: e.target.value })}
-                      rows={3}
+                      rows={4}
                     />
                   </div>
                 </div>
@@ -936,6 +1112,230 @@ export default function NovelWriterApp() {
                     {isLoading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
                     创建
                   </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            {/* Smart Generate Dialog */}
+            <Dialog open={showSmartGenerate} onOpenChange={setShowSmartGenerate}>
+              <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Wand2 className="w-5 h-5 text-amber-500" />
+                    智能生成章节
+                  </DialogTitle>
+                  <DialogDescription>
+                    根据小说简介自动分析故事结构，生成章节大纲和丰富内容
+                  </DialogDescription>
+                </DialogHeader>
+                
+                <div className="flex-1 overflow-y-auto space-y-4 py-4">
+                  {/* Novel Info */}
+                  {smartGenNovel && (
+                    <Card>
+                      <CardContent className="py-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Badge variant="secondary">{smartGenNovel.genre || '未分类'}</Badge>
+                          <span className="font-semibold">{smartGenNovel.title}</span>
+                        </div>
+                        <p className="text-sm text-muted-foreground line-clamp-2">
+                          {smartGenNovel.description}
+                        </p>
+                      </CardContent>
+                    </Card>
+                  )}
+                  
+                  {/* Settings */}
+                  {!generatedOutline && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>计划总字数</Label>
+                        <Select 
+                          value={smartGenSettings.totalWords.toString()} 
+                          onValueChange={(v) => setSmartGenSettings({ ...smartGenSettings, totalWords: parseInt(v) })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="5000">5,000 字</SelectItem>
+                            <SelectItem value="10000">10,000 字</SelectItem>
+                            <SelectItem value="30000">30,000 字</SelectItem>
+                            <SelectItem value="50000">50,000 字</SelectItem>
+                            <SelectItem value="100000">100,000 字</SelectItem>
+                            <SelectItem value="200000">200,000 字</SelectItem>
+                            <SelectItem value="500000">500,000 字</SelectItem>
+                            <SelectItem value="1000000">1,000,000 字</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>章节数量</Label>
+                        <Select 
+                          value={smartGenSettings.chapterCount.toString()} 
+                          onValueChange={(v) => setSmartGenSettings({ ...smartGenSettings, chapterCount: parseInt(v) })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="5">5 章</SelectItem>
+                            <SelectItem value="10">10 章</SelectItem>
+                            <SelectItem value="20">20 章</SelectItem>
+                            <SelectItem value="30">30 章</SelectItem>
+                            <SelectItem value="50">50 章</SelectItem>
+                            <SelectItem value="100">100 章</SelectItem>
+                            <SelectItem value="200">200 章</SelectItem>
+                            <SelectItem value="300">300 章</SelectItem>
+                            <SelectItem value="500">500 章</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Generate Outline Button */}
+                  {!generatedOutline && (
+                    <div className="space-y-3">
+                      {smartGenSettings.chapterCount > 50 && (
+                        <div className="flex items-center gap-2 p-3 bg-amber-50 dark:bg-amber-950/20 rounded-lg text-sm">
+                          <AlertCircle className="w-4 h-4 text-amber-500" />
+                          <span className="text-amber-700 dark:text-amber-300">
+                            {smartGenSettings.chapterCount}章预计需要约{Math.ceil(smartGenSettings.chapterCount / 30) * 8 + 5}秒，请耐心等待
+                          </span>
+                        </div>
+                      )}
+                      <Button 
+                        onClick={handleGenerateOutline} 
+                        disabled={isGeneratingOutline}
+                        className="w-full"
+                      >
+                        {isGeneratingOutline ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            正在生成大纲（{smartGenSettings.chapterCount}章）...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-4 h-4 mr-2" />
+                            生成章节大纲
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  )}
+                  
+                  {/* Generated Outline Preview */}
+                  {generatedOutline && (
+                    <div className="space-y-4">
+                      {/* Story Analysis */}
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <Card className="border-green-200 bg-green-50/50 dark:bg-green-950/20">
+                          <CardHeader className="pb-2 pt-3 px-3">
+                            <CardTitle className="text-sm flex items-center gap-1">
+                              <BookOpen className="w-4 h-4 text-green-500" />
+                              开头
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="pb-3 px-3">
+                            <p className="text-xs text-muted-foreground">{generatedOutline.beginning}</p>
+                          </CardContent>
+                        </Card>
+                        <Card className="border-amber-200 bg-amber-50/50 dark:bg-amber-950/20">
+                          <CardHeader className="pb-2 pt-3 px-3">
+                            <CardTitle className="text-sm flex items-center gap-1">
+                              <Edit3 className="w-4 h-4 text-amber-500" />
+                              经过
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="pb-3 px-3">
+                            <p className="text-xs text-muted-foreground">{generatedOutline.middle}</p>
+                          </CardContent>
+                        </Card>
+                        <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
+                          <CardHeader className="pb-2 pt-3 px-3">
+                            <CardTitle className="text-sm flex items-center gap-1">
+                              <BookMarked className="w-4 h-4 text-blue-500" />
+                              结尾
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="pb-3 px-3">
+                            <p className="text-xs text-muted-foreground">{generatedOutline.ending}</p>
+                          </CardContent>
+                        </Card>
+                      </div>
+                      
+                      {/* Chapter List */}
+                      <div>
+                        <h4 className="font-medium mb-2 flex items-center gap-2">
+                          <List className="w-4 h-4" />
+                          章节大纲 ({generatedOutline.chapters.length}章)
+                        </h4>
+                        <ScrollArea className="h-[200px] rounded border p-2">
+                          <div className="space-y-2">
+                            {generatedOutline.chapters.map((chapter, index) => (
+                              <div key={index} className="flex gap-3 p-2 rounded hover:bg-muted/50">
+                                <div className="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center shrink-0">
+                                  <span className="text-xs font-medium text-amber-600">{index + 1}</span>
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-medium text-sm">{chapter.title}</p>
+                                  <p className="text-xs text-muted-foreground line-clamp-1">{chapter.outline}</p>
+                                </div>
+                                <Badge variant="outline" className="shrink-0">
+                                  {chapter.estimatedWords}字
+                                </Badge>
+                              </div>
+                            ))}
+                          </div>
+                        </ScrollArea>
+                      </div>
+                      
+                      {/* Generation Progress */}
+                      {isGeneratingChapters && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-sm">
+                            <span>正在生成: {generationProgress.currentTitle}</span>
+                            <span>{generationProgress.current} / {generationProgress.total}</span>
+                          </div>
+                          <Progress value={(generationProgress.current / generationProgress.total) * 100} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                
+                <DialogFooter className="flex-col sm:flex-row gap-2">
+                  <Button 
+                    variant="outline" 
+                    onClick={() => {
+                      setShowSmartGenerate(false)
+                      setGeneratedOutline(null)
+                      setSmartGenNovel(null)
+                    }}
+                    disabled={isGeneratingChapters}
+                  >
+                    取消
+                  </Button>
+                  {generatedOutline && (
+                    <Button 
+                      onClick={handleGenerateAllChapters}
+                      disabled={isGeneratingChapters}
+                      className="bg-gradient-to-r from-amber-500 to-orange-600"
+                    >
+                      {isGeneratingChapters ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          正在生成章节内容...
+                        </>
+                      ) : (
+                        <>
+                          <Wand2 className="w-4 h-4 mr-2" />
+                          确认并生成全部章节
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -975,6 +1375,16 @@ export default function NovelWriterApp() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            <DropdownMenuItem 
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setSmartGenNovel(novel)
+                                setShowSmartGenerate(true)
+                              }}
+                            >
+                              <Wand2 className="w-4 h-4 mr-2 text-amber-500" />
+                              智能生成章节
+                            </DropdownMenuItem>
                             <DropdownMenuItem 
                               onClick={(e) => {
                                 e.stopPropagation()
@@ -1055,7 +1465,7 @@ export default function NovelWriterApp() {
                   <CardTitle className="text-base">章节目录</CardTitle>
                 </CardHeader>
                 <CardContent className="p-0">
-                  <ChapterList />
+                  <ChapterListComponent />
                 </CardContent>
               </Card>
             </div>
@@ -1078,7 +1488,7 @@ export default function NovelWriterApp() {
                           <SheetHeader>
                             <SheetTitle>{currentNovel.title}</SheetTitle>
                           </SheetHeader>
-                          <ChapterList inSheet />
+                          <ChapterListComponent inSheet />
                         </SheetContent>
                       </Sheet>
                       <div className="flex items-center gap-1">
@@ -1259,10 +1669,24 @@ export default function NovelWriterApp() {
                       <p className="text-muted-foreground text-center mb-4 text-sm">
                         从目录选择章节，或创建新章节
                       </p>
-                      <Button onClick={() => setIsCreatingChapter(true)} className="touch-manipulation">
-                        <Plus className="w-4 h-4 mr-2" />
-                        创建章节
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button onClick={() => setIsCreatingChapter(true)} className="touch-manipulation">
+                          <Plus className="w-4 h-4 mr-2" />
+                          创建章节
+                        </Button>
+                        {currentNovel?.description && currentNovel.description.length >= 20 && (
+                          <Button 
+                            variant="outline"
+                            onClick={() => {
+                              setSmartGenNovel(currentNovel)
+                              setShowSmartGenerate(true)
+                            }}
+                          >
+                            <Wand2 className="w-4 h-4 mr-2" />
+                            智能生成
+                          </Button>
+                        )}
+                      </div>
                     </CardContent>
                   </Card>
                 </div>
@@ -1311,7 +1735,7 @@ export default function NovelWriterApp() {
                 <SheetHeader>
                   <SheetTitle>{currentNovel.title}</SheetTitle>
                 </SheetHeader>
-                <ChapterList inSheet />
+                <ChapterListComponent inSheet />
               </SheetContent>
             </Sheet>
           </div>
