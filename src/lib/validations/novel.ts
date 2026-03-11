@@ -1,0 +1,86 @@
+import { z } from 'zod'
+
+// Novel status enum
+export const novelStatusSchema = z.enum(['draft', 'ongoing', 'completed'])
+
+// Novel genre enum
+export const novelGenreSchema = z.enum([
+  'fantasy',
+  'urban', 
+  'scifi',
+  'romance',
+  'wuxia',
+  'history',
+  'suspense',
+  'other'
+])
+
+// Create novel schema - trim first, then validate
+export const createNovelSchema = z.object({
+  title: z.string().trim().min(1, '标题不能为空').max(100, '标题最多100个字符'),
+  description: z.string().trim().max(2000, '简介最多2000个字符').optional().nullable(),
+  genre: novelGenreSchema.optional().nullable()
+})
+
+// Update novel schema
+export const updateNovelSchema = z.object({
+  id: z.string().min(1, 'ID不能为空'),
+  title: z.string().trim().min(1, '标题不能为空').max(100, '标题最多100个字符').optional(),
+  description: z.string().trim().max(2000, '简介最多2000个字符').optional().nullable(),
+  genre: novelGenreSchema.optional().nullable(),
+  status: novelStatusSchema.optional()
+})
+
+// Create chapter schema
+export const createChapterSchema = z.object({
+  novelId: z.string().min(1, '小说ID不能为空'),
+  title: z.string().trim().min(1, '标题不能为空').max(100, '标题最多100个字符'),
+  order: z.number().int().min(0).optional(),
+  content: z.string().max(100000, '章节内容最多100000个字符').optional()
+})
+
+// Update chapter schema
+export const updateChapterSchema = z.object({
+  id: z.string().min(1, '章节ID不能为空'),
+  title: z.string().trim().min(1, '标题不能为空').max(100, '标题最多100个字符').optional(),
+  content: z.string().max(100000, '章节内容最多100000个字符').optional(),
+  wordCount: z.number().int().min(0).optional()
+})
+
+// AI continue writing schema
+export const aiContinueSchema = z.object({
+  content: z.string().min(1, '内容不能为空').max(10000, '内容最多10000个字符'),
+  novelTitle: z.string().max(100).optional(),
+  chapterTitle: z.string().max(100).optional(),
+  genre: z.string().max(50).optional()
+})
+
+// AI title generation schema
+export const aiTitleSchema = z.object({
+  content: z.string().min(50, '内容至少50个字符才能生成标题').max(10000, '内容最多10000个字符')
+})
+
+// TTS schema
+export const ttsSchema = z.object({
+  text: z.string().min(1, '文本不能为空').max(1024, '单次请求最多1024个字符'),
+  voice: z.enum(['tongtong', 'chuichui', 'xiaochen', 'douji', 'luodo']).optional(),
+  speed: z.number().min(0.5).max(2.0).optional()
+})
+
+// Helper to validate and return error message
+export function validateOrError<T>(schema: z.ZodSchema<T>, data: unknown): { success: true; data: T } | { success: false; error: string } {
+  try {
+    const result = schema.safeParse(data)
+    if (result.success) {
+      return { success: true, data: result.data }
+    }
+    // Safely extract error message
+    const issues = result.error.issues
+    if (issues && issues.length > 0) {
+      return { success: false, error: issues[0].message }
+    }
+    return { success: false, error: '参数验证失败' }
+  } catch (e) {
+    return { success: false, error: '参数验证失败' }
+  }
+}

@@ -1,0 +1,60 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 小说表
+model Novel {
+  id          String     @id @default(cuid())
+  title       String
+  description String?
+  cover       String?    // 封面图片URL
+  genre       String?    // 小说类型：玄幻、都市、科幻等
+  status      String     @default("draft") // draft: 草稿, ongoing: 连载中, completed: 已完结
+  wordCount   Int        @default(0) // 总字数
+  chapters    Chapter[]
+  characters  Character[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@map("novels")
+}
+
+// 章节表
+model Chapter {
+  id          String   @id @default(cuid())
+  novelId     String
+  novel       Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  title       String
+  content     String   @default("") // 章节内容
+  wordCount   Int      @default(0) // 章节字数
+  order       Int      @default(0) // 章节顺序
+  isPublished Boolean  @default(false) // 是否发布
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([novelId])
+  @@map("chapters")
+}
+
+// 角色表
+model Character {
+  id          String   @id @default(cuid())
+  novelId     String
+  novel       Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  name        String   // 角色名
+  description String?  // 角色描述
+  avatar      String?  // 角色头像
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([novelId])
+  @@map("characters")
+}
