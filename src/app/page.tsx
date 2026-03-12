@@ -147,7 +147,7 @@ export default function NovelWriterApp() {
   // Smart generation states
   const [showSmartGenerate, setShowSmartGenerate] = useState(false)
   const [smartGenNovel, setSmartGenNovel] = useState<Novel | null>(null)
-  const [smartGenSettings, setSmartGenSettings] = useState({ totalWords: 10000, chapterCount: 10 })
+  const [smartGenSettings, setSmartGenSettings] = useState({ totalWords: 100000, chapterCount: 20 })
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationProgress, setGenerationProgress] = useState({
     phase: '',
@@ -1352,7 +1352,7 @@ export default function NovelWriterApp() {
                     <div className="space-y-4">
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
-                          <Label>计划总字数</Label>
+                          <Label>计划总字数（最大100万字）</Label>
                           <Select 
                             value={smartGenSettings.totalWords.toString()} 
                             onValueChange={(v) => setSmartGenSettings({ ...smartGenSettings, totalWords: parseInt(v) })}
@@ -1361,17 +1361,20 @@ export default function NovelWriterApp() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="5000">5,000 字</SelectItem>
-                              <SelectItem value="10000">10,000 字</SelectItem>
-                              <SelectItem value="30000">30,000 字</SelectItem>
-                              <SelectItem value="50000">50,000 字</SelectItem>
-                              <SelectItem value="100000">100,000 字</SelectItem>
-                              <SelectItem value="200000">200,000 字</SelectItem>
+                              <SelectItem value="10000">1万字</SelectItem>
+                              <SelectItem value="30000">3万字</SelectItem>
+                              <SelectItem value="50000">5万字</SelectItem>
+                              <SelectItem value="100000">10万字</SelectItem>
+                              <SelectItem value="200000">20万字</SelectItem>
+                              <SelectItem value="300000">30万字</SelectItem>
+                              <SelectItem value="500000">50万字</SelectItem>
+                              <SelectItem value="800000">80万字</SelectItem>
+                              <SelectItem value="1000000">100万字</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
                         <div className="space-y-2">
-                          <Label>章节数量</Label>
+                          <Label>章节数量（最大500章）</Label>
                           <Select 
                             value={smartGenSettings.chapterCount.toString()} 
                             onValueChange={(v) => setSmartGenSettings({ ...smartGenSettings, chapterCount: parseInt(v) })}
@@ -1380,11 +1383,17 @@ export default function NovelWriterApp() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="3">3 章</SelectItem>
-                              <SelectItem value="5">5 章</SelectItem>
                               <SelectItem value="10">10 章</SelectItem>
                               <SelectItem value="20">20 章</SelectItem>
                               <SelectItem value="30">30 章</SelectItem>
+                              <SelectItem value="50">50 章</SelectItem>
+                              <SelectItem value="80">80 章</SelectItem>
+                              <SelectItem value="100">100 章</SelectItem>
+                              <SelectItem value="150">150 章</SelectItem>
+                              <SelectItem value="200">200 章</SelectItem>
+                              <SelectItem value="300">300 章</SelectItem>
+                              <SelectItem value="400">400 章</SelectItem>
+                              <SelectItem value="500">500 章</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
@@ -1398,10 +1407,20 @@ export default function NovelWriterApp() {
                           <ul className="mt-1 space-y-1 text-xs list-disc list-inside">
                             <li>每章约 {Math.floor(smartGenSettings.totalWords / smartGenSettings.chapterCount).toLocaleString()} 字</li>
                             <li>AI会自动维护上下文连贯性</li>
-                            <li>生成过程中可关闭窗口，后台继续运行</li>
+                            <li>大批量生成预计需要较长时间，请耐心等待</li>
                           </ul>
                         </div>
                       </div>
+                      
+                      {/* Time Estimate */}
+                      {smartGenSettings.chapterCount > 30 && (
+                        <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-950/20 rounded-lg text-sm">
+                          <AlertCircle className="w-4 h-4 text-blue-500" />
+                          <span className="text-blue-700 dark:text-blue-300">
+                            预计生成时间：约 {Math.ceil(smartGenSettings.chapterCount / 3 * 0.5)} 分钟
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
