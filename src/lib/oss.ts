@@ -164,6 +164,104 @@ export function isOSSAvailable(): boolean {
 }
 
 /**
+ * 列出OSS中所有小说文件夹
+ * @returns 小说ID列表
+ */
+export async function listOSSNovels(): Promise<string[]> {
+  const client = getOSSClient()
+  
+  try {
+    const result = await client.list({
+      prefix: `${NOVEL_PREFIX}/`,
+      delimiter: '/'
+    })
+    
+    // 提取小说ID
+    const novelIds: string[] = []
+    if (result.prefixes) {
+      for (const prefix of result.prefixes) {
+        // prefix格式: novels/{novelId}/
+        const match = prefix.match(new RegExp(`${NOVEL_PREFIX}/([^/]+)/`))
+        if (match && match[1]) {
+          novelIds.push(match[1])
+        }
+      }
+    }
+    
+    return novelIds
+  } catch (error) {
+    console.error('列出OSS小说失败:', error)
+    throw new Error('列出OSS小说失败')
+  }
+}
+
+/**
+ * 获取OSS中小说的所有数据
+ * @param novelId 小说ID
+ * @returns 小说数据
+ */
+export async function getOSSNovelData(novelId: string): Promise<{
+  description: string | null
+  outline: unknown | null
+  chapters: Array<{ ossPath: string; content: string }>
+}> {
+  const client = getOSSClient()
+  const prefix = `${NOVEL_PREFIX}/${novelId}/`
+  
+  try {
+    const result = await client.list({ prefix })
+    
+    const data = {
+      description: null as string | null,
+      outline: null as unknown | null,
+      chapters: [] as Array<{ ossPath: string; content: string }>
+    }
+    
+    if (!result.objects) {
+      return data
+    }
+    
+    for (const obj of result.objects) {
+      const fileName = obj.name.replace(prefix, '')
+      
+      if (fileName === 'description.txt') {
+        try {
+          const content = await client.get(obj.name)
+          data.description = content.content.toString('utf-8')
+        } catch (e) {
+          console.error('读取简介失败:', e)
+        }
+      } else if (fileName === 'outline.json') {
+        try {
+          const content = await client.get(obj.name)
+          data.outline = JSON.parse(content.content.toString('utf-8'))
+        } catch (e) {
+          console.error('读取大纲失败:', e)
+        }
+      } else if (fileName.startsWith('chapters/') && fileName.endsWith('.txt')) {
+        try {
+          const content = await client.get(obj.name)
+          data.chapters.push({
+            ossPath: obj.name,
+            content: content.content.toString('utf-8')
+          })
+        } catch (e) {
+          console.error('读取章节失败:', e)
+        }
+      }
+    }
+    
+    // 按文件名排序章节
+    data.chapters.sort((a, b) => a.ossPath.localeCompare(b.ossPath))
+    
+    return data
+  } catch (error) {
+    console.error('获取OSS小说数据失败:', error)
+    throw new Error('获取OSS小说数据失败')
+  }
+}
+
+/**
  * 上传小说大纲到OSS
  * @param novelId 小说ID
  * @param outline 大纲JSON
