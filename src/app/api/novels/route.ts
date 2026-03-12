@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { createNovelSchema, updateNovelSchema, validateOrError } from '@/lib/validations/novel'
-import { deleteNovelFiles, isOSSAvailable } from '@/lib/oss'
-
-// GET - 获取所有小说
+import { 
+  saveNovelToOSS, 
+  updateNovelMeta,
+  deleteNovelFromOSS,
+  isOSSAvailable 
+} from '@/lib/oss'
 export async function GET() {
   try {
     const novels = await db.novel.findMany({
@@ -51,6 +54,22 @@ export async function POST(request: NextRequest) {
       }
     })
     
+    // 同步到OSS
+    if (isOSSAvailable()) {
+      try {
+        await saveNovelToOSS(novel.id, {
+          title: novel.title,
+          genre: novel.genre,
+          status: novel.status,
+          wordCount: 0,
+          description: description || undefined
+        })
+      } catch (ossError) {
+        console.error('同步到OSS失败:', ossError)
+        // 继续执行，不影响主流程
+      }
+    }
+    
     return NextResponse.json({ success: true, novel })
   } catch (error) {
     console.error('Failed to create novel:', error)
@@ -88,6 +107,37 @@ export async function PUT(request: NextRequest) {
       data: updateData
     })
     
+    // 同步到OSS
+    if (isOSSAvailable()) {
+      try {
+        await updateNovelMeta(id, {
+          title: novel.title,
+          genre: novel.genre,
+          status: novel.status,
+          wordCount: novel.wordCount
+        })
+        
+        // 如果更新了简介，也要保存
+        if (description !== undefined && description) {
+          const { saveChapterContent } = await import('@/lib/oss')
+          // 简介单独保存
+          const client = (await import('ali-oss')).default
+          const ossClient = new client({
+            region: process.env.OSS_REGION || 'oss-cn-beijing',
+            accessKeyId: process.env.OSS_ACCESS_KEY_ID || '',
+            accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || '',
+            bucket: process.env.OSS_BUCKET || 'ai-story-stroe',
+          })
+          await ossClient.put(
+            `novels/${id}/description.txt`,
+            Buffer.from(description, 'utf-8')
+          )
+        }
+      } catch (ossError) {
+        console.error('同步到OSS失败:', ossError)
+      }
+    }
+    
     return NextResponse.json({ success: true, novel })
   } catch (error) {
     console.error('Failed to update novel:', error)
@@ -108,7 +158,7 @@ export async function DELETE(request: NextRequest) {
     // 删除OSS上的所有文件
     if (isOSSAvailable()) {
       try {
-        await deleteNovelFiles(id)
+        await deleteNovelFromOSS(id)
       } catch (error) {
         console.error('Failed to delete OSS files:', error)
         // 继续删除数据库记录

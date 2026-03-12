@@ -164,11 +164,23 @@ export default function NovelWriterApp() {
     return () => window.removeEventListener('resize', checkMobile)
   }, [])
 
-  // Fetch novels - initial load
+  // Fetch novels - initial load with OSS sync
   useEffect(() => {
     let isMounted = true
     const fetchNovels = async () => {
       try {
+        // 先尝试从OSS同步数据到本地
+        try {
+          const syncRes = await fetch('/api/oss/sync')
+          const syncData = await syncRes.json()
+          if (syncData.success && syncData.syncedCount > 0) {
+            console.log(`从OSS同步了 ${syncData.syncedCount} 本小说`)
+          }
+        } catch (syncError) {
+          console.log('OSS同步跳过:', syncError)
+        }
+        
+        // 获取小说列表
         const res = await fetch('/api/novels')
         const data = await res.json()
         if (data.success && isMounted) {

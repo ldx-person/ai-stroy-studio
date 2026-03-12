@@ -2,14 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { createChapterSchema, updateChapterSchema, validateOrError } from '@/lib/validations/novel'
 import { 
-  uploadChapterContent, 
-  downloadChapterContent, 
-  deleteChapterContent,
+  saveChapterContent,
+  getChapterContent,
+  updateChapterInIndex,
+  removeChapterFromIndex,
   isOSSAvailable 
 } from '@/lib/oss'
-
-// 内容长度阈值，超过此长度则存储到OSS
-const OSS_THRESHOLD = 500
 
 // Helper function to update novel word count
 async function updateNovelWordCount(novelId: string) {
@@ -24,6 +22,16 @@ async function updateNovelWordCount(novelId: string) {
     where: { id: novelId },
     data: { wordCount: totalWordCount }
   })
+  
+  // 同步到OSS
+  if (isOSSAvailable()) {
+    try {
+      const { updateNovelMeta } = await import('@/lib/oss')
+      await updateNovelMeta(novelId, { wordCount: totalWordCount })
+    } catch (e) {
+      console.error('更新OSS字数失败:', e)
+    }
+  }
 }
 
 // POST - 创建新章节
@@ -46,38 +54,26 @@ export async function POST(request: NextRequest) {
         novelId,
         title,
         order: order || 0,
-        content: '', // 先创建空内容
+        content: chapterContent,
         wordCount
       }
     })
     
-    // 如果内容超过阈值且OSS可用，上传到OSS
-    let contentOss: string | null = null
-    if (chapterContent && isOSSAvailable()) {
+    // 同步到OSS
+    if (isOSSAvailable()) {
       try {
-        contentOss = await uploadChapterContent(novelId, chapter.id, chapterContent)
-        // 更新章节记录
-        await db.chapter.update({
-          where: { id: chapter.id },
-          data: { contentOss }
+        // 保存章节内容
+        await saveChapterContent(novelId, chapter.id, chapterContent)
+        // 更新章节索引
+        await updateChapterInIndex(novelId, chapter.id, {
+          title: chapter.title,
+          wordCount: chapter.wordCount,
+          order: chapter.order,
+          isPublished: chapter.isPublished
         })
-        chapter.contentOss = contentOss
       } catch (ossError) {
-        console.error('OSS upload failed, falling back to database storage:', ossError)
-        // OSS上传失败，回退到数据库存储
-        await db.chapter.update({
-          where: { id: chapter.id },
-          data: { content: chapterContent }
-        })
-        chapter.content = chapterContent
+        console.error('同步章节到OSS失败:', ossError)
       }
-    } else if (chapterContent) {
-      // OSS不可用或内容较短，直接存数据库
-      await db.chapter.update({
-        where: { id: chapter.id },
-        data: { content: chapterContent }
-      })
-      chapter.content = chapterContent
     }
     
     // 更新小说字数
@@ -104,7 +100,7 @@ export async function PUT(request: NextRequest) {
     
     const existingChapter = await db.chapter.findUnique({
       where: { id },
-      select: { novelId: true, contentOss: true }
+      select: { novelId: true }
     })
     
     if (!existingChapter) {
@@ -114,7 +110,6 @@ export async function PUT(request: NextRequest) {
     const updateData: {
       title?: string
       content?: string
-      contentOss?: string | null
       wordCount?: number
     } = {}
     
@@ -123,21 +118,19 @@ export async function PUT(request: NextRequest) {
     if (content !== undefined) {
       const newWordCount = content.length
       updateData.wordCount = newWordCount
+      updateData.content = content
       
-      // 如果内容超过阈值且OSS可用，上传到OSS
-      if (content && isOSSAvailable()) {
+      // 同步到OSS
+      if (isOSSAvailable()) {
         try {
-          const contentOss = await uploadChapterContent(existingChapter.novelId, id, content)
-          updateData.contentOss = contentOss
-          updateData.content = '' // 清空数据库中的内容
+          await saveChapterContent(existingChapter.novelId, id, content)
+          await updateChapterInIndex(existingChapter.novelId, id, {
+            title: title,
+            wordCount: newWordCount
+          })
         } catch (ossError) {
-          console.error('OSS upload failed, falling back to database storage:', ossError)
-          updateData.content = content
-          updateData.contentOss = null
+          console.error('同步章节到OSS失败:', ossError)
         }
-      } else {
-        updateData.content = content
-        updateData.contentOss = null
       }
     } else if (wordCount !== undefined) {
       updateData.wordCount = wordCount
@@ -172,7 +165,7 @@ export async function DELETE(request: NextRequest) {
     
     const chapter = await db.chapter.findUnique({
       where: { id },
-      select: { novelId: true, contentOss: true }
+      select: { novelId: true }
     })
     
     if (!chapter) {
@@ -182,12 +175,11 @@ export async function DELETE(request: NextRequest) {
     const novelId = chapter.novelId
     
     // 删除OSS上的内容
-    if (chapter.contentOss && isOSSAvailable()) {
+    if (isOSSAvailable()) {
       try {
-        await deleteChapterContent(chapter.contentOss)
+        await removeChapterFromIndex(novelId, id)
       } catch (ossError) {
-        console.error('Failed to delete OSS content:', ossError)
-        // 继续删除数据库记录
+        console.error('删除OSS章节失败:', ossError)
       }
     }
     
@@ -205,7 +197,7 @@ export async function DELETE(request: NextRequest) {
   }
 }
 
-// GET - 获取章节内容（支持从OSS读取）
+// GET - 获取章节内容
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
@@ -222,7 +214,6 @@ export async function GET(request: NextRequest) {
         novelId: true,
         title: true,
         content: true,
-        contentOss: true,
         wordCount: true,
         order: true,
         isPublished: true,
@@ -235,14 +226,20 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Chapter not found' }, { status: 404 })
     }
     
-    // 如果有OSS路径，从OSS读取内容
+    // 如果数据库内容为空，尝试从OSS读取
     let fullContent = chapter.content
-    if (chapter.contentOss && isOSSAvailable()) {
+    if (!fullContent && isOSSAvailable()) {
       try {
-        fullContent = await downloadChapterContent(chapter.contentOss)
+        fullContent = await getChapterContent(chapter.novelId, id)
+        if (fullContent) {
+          // 更新数据库
+          await db.chapter.update({
+            where: { id },
+            data: { content: fullContent, wordCount: fullContent.length }
+          })
+        }
       } catch (ossError) {
-        console.error('Failed to download from OSS:', ossError)
-        // 使用数据库中的内容
+        console.error('从OSS读取章节失败:', ossError)
       }
     }
     
