@@ -153,6 +153,11 @@ export default function NovelWriterApp() {
   const [isGeneratingChapters, setIsGeneratingChapters] = useState(false)
   const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0, currentTitle: '' })
   
+  // Edit novel states
+  const [isEditingNovel, setIsEditingNovel] = useState(false)
+  const [editingNovel, setEditingNovel] = useState<Novel | null>(null)
+  const [editNovelData, setEditNovelData] = useState({ title: '', description: '', genre: '' })
+  
   const { toast } = useToast()
 
   // Detect mobile
@@ -323,6 +328,54 @@ export default function NovelWriterApp() {
     } catch (error) {
       toast({ title: '更新失败', variant: 'destructive' })
     }
+  }
+
+  // Open edit novel dialog
+  const openEditNovelDialog = (novel: Novel) => {
+    setEditingNovel(novel)
+    setEditNovelData({
+      title: novel.title,
+      description: novel.description || '',
+      genre: novel.genre || ''
+    })
+    setIsEditingNovel(true)
+  }
+
+  // Handle edit novel
+  const handleEditNovel = async () => {
+    if (!editingNovel || !editNovelData.title.trim()) {
+      toast({ title: '请输入小说标题', variant: 'destructive' })
+      return
+    }
+    
+    setIsLoading(true)
+    try {
+      const res = await fetch('/api/novels', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingNovel.id,
+          title: editNovelData.title,
+          description: editNovelData.description,
+          genre: editNovelData.genre
+        })
+      })
+      const data = await res.json()
+      if (data.success) {
+        setNovels(novels.map(n => n.id === editingNovel.id ? {
+          ...n,
+          title: editNovelData.title,
+          description: editNovelData.description,
+          genre: editNovelData.genre
+        } : n))
+        setIsEditingNovel(false)
+        setEditingNovel(null)
+        toast({ title: '小说信息已更新' })
+      }
+    } catch (error) {
+      toast({ title: '更新失败', variant: 'destructive' })
+    }
+    setIsLoading(false)
   }
 
   // Open novel editor
@@ -1128,6 +1181,64 @@ export default function NovelWriterApp() {
               </DialogContent>
             </Dialog>
 
+            {/* Edit Novel Dialog */}
+            <Dialog open={isEditingNovel} onOpenChange={setIsEditingNovel}>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>编辑小说信息</DialogTitle>
+                  <DialogDescription>
+                    修改小说的名称、类型和简介
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-title">小说标题 *</Label>
+                    <Input
+                      id="edit-title"
+                      placeholder="输入小说标题"
+                      value={editNovelData.title}
+                      onChange={(e) => setEditNovelData({ ...editNovelData, title: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-genre">类型</Label>
+                    <Select value={editNovelData.genre} onValueChange={(value) => setEditNovelData({ ...editNovelData, genre: value })}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="选择小说类型" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="fantasy">玄幻</SelectItem>
+                        <SelectItem value="urban">都市</SelectItem>
+                        <SelectItem value="scifi">科幻</SelectItem>
+                        <SelectItem value="romance">言情</SelectItem>
+                        <SelectItem value="wuxia">武侠</SelectItem>
+                        <SelectItem value="history">历史</SelectItem>
+                        <SelectItem value="suspense">悬疑</SelectItem>
+                        <SelectItem value="other">其他</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="edit-description">简介</Label>
+                    <Textarea
+                      id="edit-description"
+                      placeholder="详细描述你的故事背景、主要人物、情节发展..."
+                      value={editNovelData.description}
+                      onChange={(e) => setEditNovelData({ ...editNovelData, description: e.target.value })}
+                      rows={4}
+                    />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setIsEditingNovel(false)}>取消</Button>
+                  <Button onClick={handleEditNovel} disabled={isLoading}>
+                    {isLoading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                    保存
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
             {/* Smart Generate Dialog */}
             <Dialog open={showSmartGenerate} onOpenChange={setShowSmartGenerate}>
               <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
@@ -1387,6 +1498,15 @@ export default function NovelWriterApp() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            <DropdownMenuItem 
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                openEditNovelDialog(novel)
+                              }}
+                            >
+                              <Edit3 className="w-4 h-4 mr-2" />
+                              编辑信息
+                            </DropdownMenuItem>
                             <DropdownMenuItem 
                               onClick={(e) => {
                                 e.stopPropagation()
