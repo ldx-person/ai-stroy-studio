@@ -1,13 +1,13 @@
 /**
- * 智谱AI大模型服务客户端
- * 使用OpenAI兼容格式调用GLM模型
+ * AI大模型服务客户端
+ * 支持阿里云百炼和智谱AI
  */
 
-// API配置 - 支持智谱AI
+// API配置 - 优先使用阿里云，备选智谱AI
 const AI_CONFIG = {
-  apiKey: process.env.ZHIPU_AI_API_KEY || process.env.ALIYUN_AI_API_KEY || '',
-  model: process.env.ZHIPU_AI_MODEL || process.env.ALIYUN_AI_MODEL || 'glm-5',
-  baseUrl: process.env.ZHIPU_AI_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4',
+  apiKey: process.env.ALIYUN_AI_API_KEY || process.env.ZHIPU_AI_API_KEY || '',
+  model: process.env.ALIYUN_AI_MODEL || process.env.ZHIPU_AI_MODEL || 'qwen-turbo',
+  baseUrl: process.env.ALIYUN_AI_BASE_URL || process.env.ZHIPU_AI_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
 }
 
 // 消息类型
@@ -54,7 +54,7 @@ export async function callAliyunAI(
   } = {}
 ): Promise<string> {
   if (!checkAIConfig()) {
-    throw new Error('智谱AI大模型API配置不完整，请检查环境变量ZHIPU_AI_API_KEY')
+    throw new Error('AI大模型API配置不完整，请检查环境变量ALIYUN_AI_API_KEY')
   }
 
   const { temperature = 0.7, maxTokens = 4096, topP = 0.9 } = options
