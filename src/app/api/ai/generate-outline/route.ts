@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { callAliyunAIWithRetry } from '@/lib/aliyun-ai'
+import { callAliyunAIWithRetry } from '@/lib/ai'
 import { z } from 'zod'
 
 // 章节大纲结构

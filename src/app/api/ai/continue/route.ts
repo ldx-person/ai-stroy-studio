@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { callAliyunAIWithRetry, ChatMessage } from '@/lib/aliyun-ai'
+import { callAliyunAIWithRetry, ChatMessage } from '@/lib/ai'
 import { aiContinueSchema, validateOrError } from '@/lib/validations/novel'
 
 export async function POST(request: NextRequest) {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { callAliyunAIWithRetry, ChatMessage } from '@/lib/aliyun-ai'
+import { callAliyunAIWithRetry, ChatMessage } from '@/lib/ai'
 import { z } from 'zod'
 
 // AI title generation schema
