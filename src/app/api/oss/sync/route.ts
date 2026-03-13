@@ -75,6 +75,9 @@ export async function GET() {
           
           // 同步章节
           for (const chapter of fullData.chapters) {
+            // 处理可能缺少的字段
+            const chapterTitle = chapter.title || `第${(chapter.order || 0) + 1}章`
+            
             const existingChapter = await db.chapter.findUnique({
               where: { id: chapter.id }
             })
@@ -83,11 +86,11 @@ export async function GET() {
               await db.chapter.update({
                 where: { id: chapter.id },
                 data: {
-                  title: chapter.title,
-                  content: chapter.content,
-                  wordCount: chapter.wordCount,
-                  order: chapter.order,
-                  isPublished: chapter.isPublished
+                  title: chapterTitle,
+                  content: chapter.content || '',
+                  wordCount: chapter.wordCount || 0,
+                  order: chapter.order || 0,
+                  isPublished: chapter.isPublished || false
                 }
               })
             } else {
@@ -95,13 +98,13 @@ export async function GET() {
                 data: {
                   id: chapter.id,
                   novelId: novelMeta.id,
-                  title: chapter.title,
-                  content: chapter.content,
-                  wordCount: chapter.wordCount,
-                  order: chapter.order,
-                  isPublished: chapter.isPublished,
-                  createdAt: new Date(chapter.createdAt),
-                  updatedAt: new Date(chapter.updatedAt)
+                  title: chapterTitle,
+                  content: chapter.content || '',
+                  wordCount: chapter.wordCount || 0,
+                  order: chapter.order || 0,
+                  isPublished: chapter.isPublished || false,
+                  createdAt: new Date(chapter.createdAt || Date.now()),
+                  updatedAt: new Date(chapter.updatedAt || Date.now())
                 }
               })
             }
