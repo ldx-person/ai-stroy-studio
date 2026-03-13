@@ -1,13 +1,13 @@
 /**
- * 阿里云百炼大模型服务客户端
- * 使用OpenAI兼容格式调用通义千问模型
+ * 智谱AI大模型服务客户端
+ * 使用OpenAI兼容格式调用GLM模型
  */
 
-// API配置
-const ALIYUN_AI_CONFIG = {
-  apiKey: process.env.ALIYUN_AI_API_KEY || '',
-  model: process.env.ALIYUN_AI_MODEL || 'qwen-turbo', // 通义千问模型
-  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', // 阿里云百炼API
+// API配置 - 支持智谱AI
+const AI_CONFIG = {
+  apiKey: process.env.ZHIPU_AI_API_KEY || process.env.ALIYUN_AI_API_KEY || '',
+  model: process.env.ZHIPU_AI_MODEL || process.env.ALIYUN_AI_MODEL || 'glm-5',
+  baseUrl: process.env.ZHIPU_AI_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4',
 }
 
 // 消息类型
@@ -36,11 +36,11 @@ interface ChatCompletionResponse {
 
 // 检查配置是否完整
 function checkAIConfig(): boolean {
-  return !!ALIYUN_AI_CONFIG.apiKey
+  return !!AI_CONFIG.apiKey
 }
 
 /**
- * 调用阿里云百炼大模型API
+ * 调用智谱AI大模型API
  * @param messages 消息列表
  * @param options 可选参数
  * @returns 生成的文本内容
@@ -54,19 +54,19 @@ export async function callAliyunAI(
   } = {}
 ): Promise<string> {
   if (!checkAIConfig()) {
-    throw new Error('阿里云大模型API配置不完整，请检查环境变量ALIYUN_AI_API_KEY')
+    throw new Error('智谱AI大模型API配置不完整，请检查环境变量ZHIPU_AI_API_KEY')
   }
 
   const { temperature = 0.7, maxTokens = 4096, topP = 0.9 } = options
 
-  const response = await fetch(`${ALIYUN_AI_CONFIG.baseUrl}/chat/completions`, {
+  const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${ALIYUN_AI_CONFIG.apiKey}`,
+      'Authorization': `Bearer ${AI_CONFIG.apiKey}`,
     },
     body: JSON.stringify({
-      model: ALIYUN_AI_CONFIG.model,
+      model: AI_CONFIG.model,
       messages,
       temperature,
       max_tokens: maxTokens,
@@ -139,7 +139,7 @@ export async function callAliyunAIWithRetry(
 }
 
 /**
- * 检查阿里云AI配置是否可用
+ * 检查智谱AI配置是否可用
  */
 export function isAliyunAIAvailable(): boolean {
   return checkAIConfig()
@@ -149,5 +149,5 @@ export function isAliyunAIAvailable(): boolean {
  * 获取当前使用的模型名称
  */
 export function getCurrentModel(): string {
-  return ALIYUN_AI_CONFIG.model
+  return AI_CONFIG.model
 }
