@@ -57,7 +57,7 @@ export function ChapterList({
           )}
         </div>
       )}
-      <ScrollArea className={compact ? 'h-[60vh]' : 'h-[calc(100%-60px)]'}>
+      <ScrollArea className={compact ? 'h-[60vh]' : 'h-[60vh]'}>
         <div className={compact ? 'space-y-1' : 'px-2 pb-2'}>
           {sortedChapters.map((chapter) => (
             <div

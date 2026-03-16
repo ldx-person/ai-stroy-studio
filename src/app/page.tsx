@@ -123,6 +123,7 @@ export default function NovelWriterApp() {
   const [isLoading, setIsLoading] = useState(false)
   const [isAILoading, setIsAILoading] = useState(false)
   const [aiSuggestion, setAiSuggestion] = useState('')
+  const [aiMode, setAiMode] = useState<'continue' | 'polish' | 'shorten' | 'expand'>('continue')
   
   // Form states
   const [newNovel, setNewNovel] = useState({ title: '', description: '', genre: '' })
@@ -554,10 +555,37 @@ export default function NovelWriterApp() {
 
   // Apply AI suggestion
   const applySuggestion = () => {
-    if (aiSuggestion) {
-      setEditingContent(editingContent + '\n\n' + aiSuggestion)
-      setAiSuggestion('')
+    if (!aiSuggestion) return
+    setEditingContent(aiSuggestion)
+    setAiSuggestion('')
+  }
+
+  const handleAIRefine = async (mode: 'polish' | 'shorten' | 'expand') => {
+    const content = editingContent.trim()
+    if (!content) {
+      toast({ title: '请先输入一些内容', variant: 'destructive' })
+      return
     }
+
+    setIsAILoading(true)
+    setAiMode(mode)
+    try {
+      const res = await fetch('/api/ai/refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, mode }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        toast({ title: data.error || 'AI 优化失败', variant: 'destructive' })
+        return
+      }
+      setAiSuggestion(data.result)
+    } catch (error) {
+      console.error('AI refine error:', error)
+      toast({ title: 'AI 优化失败', variant: 'destructive' })
+    }
+    setIsAILoading(false)
   }
 
   // Calculate total word count
@@ -1685,7 +1713,7 @@ export default function NovelWriterApp() {
                     <TabsContent value="write" className="flex-1 mt-3 md:mt-4">
                       <Textarea
                         placeholder="开始你的创作..."
-                        className="h-full resize-none text-base leading-relaxed"
+                        className="h-full max-h-[70vh] min-h-[40vh] overflow-y-auto resize-none text-base leading-relaxed"
                         value={editingContent}
                         onChange={(e) => setEditingContent(e.target.value)}
                       />
@@ -1699,7 +1727,7 @@ export default function NovelWriterApp() {
                           onClick={handleAIContinue}
                           disabled={isAILoading}
                         >
-                          {isAILoading ? (
+                          {isAILoading && aiMode === 'continue' ? (
                             <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
                           ) : (
                             <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-amber-500" />
@@ -1713,13 +1741,63 @@ export default function NovelWriterApp() {
                           onClick={handleAITitle}
                           disabled={isAILoading}
                         >
-                          {isAILoading ? (
+                          {isAILoading && aiMode === 'continue' ? (
                             <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
                           ) : (
                             <FileText className="w-4 h-4 md:w-5 md:h-5 text-blue-500" />
                           )}
                           <span className="text-xs md:text-sm">生成标题</span>
                           <span className="text-[10px] md:text-xs text-muted-foreground hidden md:block">根据内容生成章节标题</span>
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 md:gap-3">
+                        <Button
+                          variant="outline"
+                          className="h-auto py-3 md:py-4 flex flex-col gap-1 touch-manipulation"
+                          onClick={() => handleAIRefine('polish')}
+                          disabled={isAILoading}
+                        >
+                          {isAILoading && aiMode === 'polish' ? (
+                            <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-emerald-500" />
+                          )}
+                          <span className="text-xs md:text-sm">润色优化</span>
+                          <span className="text-[10px] md:text-xs text-muted-foreground hidden md:block">
+                            提升文笔表达，保持原意
+                          </span>
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="h-auto py-3 md:py-4 flex flex-col gap-1 touch-manipulation"
+                          onClick={() => handleAIRefine('shorten')}
+                          disabled={isAILoading}
+                        >
+                          {isAILoading && aiMode === 'shorten' ? (
+                            <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-purple-500" />
+                          )}
+                          <span className="text-xs md:text-sm">精简文本</span>
+                          <span className="text-[10px] md:text-xs text-muted-foreground hidden md:block">
+                            保留重点，压缩篇幅
+                          </span>
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="h-auto py-3 md:py-4 flex flex-col gap-1 touch-manipulation col-span-2"
+                          onClick={() => handleAIRefine('expand')}
+                          disabled={isAILoading}
+                        >
+                          {isAILoading && aiMode === 'expand' ? (
+                            <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-pink-500" />
+                          )}
+                          <span className="text-xs md:text-sm">细节扩写</span>
+                          <span className="text-[10px] md:text-xs text-muted-foreground hidden md:block">
+                            加强场景、情绪和对话细节
+                          </span>
                         </Button>
                       </div>
                       

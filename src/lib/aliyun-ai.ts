@@ -1,13 +1,33 @@
 /**
  * AI大模型服务客户端
- * 支持阿里云百炼和智谱AI
+ *
+ * 默认接入 Z.AI 的 GLM-5-Turbo（参考官方文档 https://docs.z.ai/guides/llm/glm-5-turbo）
+ * 如果需要兼容旧配置，也会回退到阿里云/智谱的环境变量。
  */
 
-// API配置 - 优先使用阿里云，备选智谱AI
+// 优先使用 Z.AI 配置，其次兼容阿里云/智谱的旧配置
 const AI_CONFIG = {
-  apiKey: process.env.ALIYUN_AI_API_KEY || process.env.ZHIPU_AI_API_KEY || '',
-  model: process.env.ALIYUN_AI_MODEL || process.env.ZHIPU_AI_MODEL || 'qwen-turbo',
-  baseUrl: process.env.ALIYUN_AI_BASE_URL || process.env.ZHIPU_AI_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  // Z.AI API Key 优先，其次兼容之前的环境变量
+  apiKey:
+    process.env.ZAI_API_KEY ||
+    process.env.ALIYUN_AI_API_KEY ||
+    process.env.ZHIPU_AI_API_KEY ||
+    '',
+
+  // 默认模型切换为 GLM-5-Turbo
+  model:
+    process.env.ZAI_MODEL ||
+    process.env.ALIYUN_AI_MODEL ||
+    process.env.ZHIPU_AI_MODEL ||
+    'glm-5-turbo',
+
+  // 默认基地址切换为 Z.AI 的 v4 Chat Completions 兼容接口
+  // 文档示例：POST https://api.z.ai/api/paas/v4/chat/completions
+  baseUrl:
+    process.env.ZAI_BASE_URL ||
+    process.env.ALIYUN_AI_BASE_URL ||
+    process.env.ZHIPU_AI_BASE_URL ||
+    'https://api.z.ai/api/paas/v4',
 }
 
 // 消息类型
@@ -54,7 +74,7 @@ export async function callAliyunAI(
   } = {}
 ): Promise<string> {
   if (!checkAIConfig()) {
-    throw new Error('AI大模型API配置不完整，请检查环境变量ALIYUN_AI_API_KEY')
+    throw new Error('AI大模型API配置不完整，请检查环境变量 ZAI_API_KEY（或兼容的 ALIYUN_AI_API_KEY / ZHIPU_AI_API_KEY）')
   }
 
   const { temperature = 0.7, maxTokens = 4096, topP = 0.9 } = options
