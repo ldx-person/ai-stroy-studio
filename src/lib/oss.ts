@@ -172,6 +172,43 @@ export async function saveNovelToOSS(
 }
 
 /**
+ * 从OSS获取小说元数据（不读取章节内容，只读取章节索引）
+ */
+export async function getNovelMetaFromOSS(novelId: string): Promise<{
+  description: string | null
+  chapters: OSSChapterMeta[]
+} | null> {
+  const client = getOSSClient()
+  const prefix = `${NOVEL_PREFIX}/${novelId}/`
+  
+  try {
+    // 读取简介
+    let description: string | null = null
+    try {
+      const descResult = await client.get(`${prefix}description.txt`)
+      description = descResult.content.toString('utf-8')
+    } catch {
+      // 简介可能不存在
+    }
+    
+    // 读取章节索引（不读取内容）
+    let chapters: OSSChapterMeta[] = []
+    try {
+      const chaptersIndexResult = await client.get(`${prefix}chapters.json`)
+      chapters = JSON.parse(chaptersIndexResult.content.toString('utf-8'))
+      chapters.sort((a, b) => a.order - b.order)
+    } catch {
+      // 章节索引可能不存在
+    }
+    
+    return { description, chapters }
+  } catch (error) {
+    console.error('从OSS获取小说元数据失败:', error)
+    return null
+  }
+}
+
+/**
  * 从OSS获取单个小说完整数据
  */
 export async function getNovelFromOSS(novelId: string): Promise<OSSNovelFull | null> {
@@ -261,29 +298,45 @@ export async function getNovelFromOSS(novelId: string): Promise<OSSNovelFull | n
 
 /**
  * 列出OSS中所有小说
+ * 优化：使用 delimiter 按目录分组，直接定位 novel.json，并发读取减少请求数
  */
 export async function listOSSNovels(): Promise<OSSNovelMeta[]> {
   const client = getOSSClient()
   
   try {
-    // 列出所有novel.json文件
+    // 第一步：用 delimiter 列出所有小说目录（只返回目录前缀，不列出所有文件）
     const result = await client.list({
       prefix: `${NOVEL_PREFIX}/`,
+      delimiter: '/',
       'max-keys': 1000
     })
     
     const novels: OSSNovelMeta[] = []
     
-    if (result.objects) {
-      for (const obj of result.objects) {
-        if (obj.name.endsWith('/novel.json')) {
-          try {
-            const metaResult = await client.get(obj.name)
-            const meta: OSSNovelMeta = JSON.parse(metaResult.content.toString('utf-8'))
-            novels.push(meta)
-          } catch (e) {
-            console.error('读取小说元数据失败:', obj.name, e)
-          }
+    // result.prefixes 包含所有子目录，如 ['novels/abc123/', 'novels/def456/']
+    const prefixes: string[] = result.prefixes || []
+    
+    if (prefixes.length === 0) {
+      return []
+    }
+    
+    // 第二步：并发读取所有 novel.json 文件（最多 10 个并发）
+    const CONCURRENCY = 10
+    for (let i = 0; i < prefixes.length; i += CONCURRENCY) {
+      const batch = prefixes.slice(i, i + CONCURRENCY)
+      const batchResults = await Promise.allSettled(
+        batch.map(async (prefix) => {
+          const novelJsonKey = `${prefix}novel.json`
+          const metaResult = await client.get(novelJsonKey)
+          const meta: OSSNovelMeta = JSON.parse(metaResult.content.toString('utf-8'))
+          return meta
+        })
+      )
+      for (const res of batchResults) {
+        if (res.status === 'fulfilled') {
+          novels.push(res.value)
+        } else {
+          console.error('读取小说元数据失败:', res.reason)
         }
       }
     }
@@ -318,19 +371,20 @@ async function migrateOldStructure(novelId: string): Promise<OSSNovelFull | null
     let description: string | null = null
     
     // 读取所有文件
-    for (const obj of result.objects) {
-      const fileName = obj.name.replace(prefix, '')
+    for (const ossObj of result.objects) {
+      const ossKey = ossObj.name
+      const fileName = ossKey.replace(prefix, '')
       
       if (fileName === 'description.txt') {
         try {
-          const content = await client.get(obj.name)
+          const content = await client.get(ossKey)
           description = content.content.toString('utf-8')
         } catch (e) {
           console.error('读取简介失败:', e)
         }
       } else if (fileName.startsWith('chapters/') && fileName.endsWith('.txt')) {
         try {
-          const content = await client.get(obj.name)
+          const content = await client.get(ossKey)
           const chapterId = fileName.replace('chapters/', '').replace('.txt', '')
           chapters.push({
             id: chapterId,
@@ -562,7 +616,7 @@ export async function deleteNovelFromOSS(novelId: string): Promise<void> {
     
     if (result.objects && result.objects.length > 0) {
       // 批量删除
-      const files = result.objects.map(obj => obj.name)
+      const files = result.objects.map(ossObj => ossObj.name)
       await client.deleteMulti(files)
     }
   } catch (error) {

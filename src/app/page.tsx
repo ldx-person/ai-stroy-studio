@@ -177,23 +177,12 @@ export default function NovelWriterApp() {
     return () => window.removeEventListener('resize', checkMobile)
   }, [])
 
-  // Fetch novels - initial load with OSS sync
+  // Fetch novels - load local data immediately, then sync OSS in background
   useEffect(() => {
     let isMounted = true
     const fetchNovels = async () => {
       try {
-        // 先尝试从OSS同步数据到本地
-        try {
-          const syncRes = await fetch('/api/oss/sync')
-          const syncData = await syncRes.json()
-          if (syncData.success && syncData.syncedCount > 0) {
-            console.log(`从OSS同步了 ${syncData.syncedCount} 本小说`)
-          }
-        } catch (syncError) {
-          console.log('OSS同步跳过:', syncError)
-        }
-        
-        // 获取小说列表
+        // 第一步：立即加载本地数据库中的小说列表，快速展示给用户
         const res = await fetch('/api/novels')
         const data = await res.json()
         if (data.success && isMounted) {
@@ -202,6 +191,22 @@ export default function NovelWriterApp() {
       } catch (error) {
         console.error('Failed to fetch novels:', error)
       }
+
+      // 第二步：后台异步执行 OSS 同步，不阻塞页面渲染
+      fetch('/api/oss/sync')
+        .then(r => r.json())
+        .then(syncData => {
+          if (!isMounted) return
+          if (syncData.success && syncData.syncedCount > 0) {
+            console.log(`从OSS同步了 ${syncData.syncedCount} 本小说，刷新列表`)
+            // 同步完成后刷新小说列表
+            fetch('/api/novels')
+              .then(r => r.json())
+              .then(d => { if (d.success && isMounted) setNovels(d.novels) })
+              .catch(() => {})
+          }
+        })
+        .catch(syncError => console.log('OSS同步跳过:', syncError))
     }
     fetchNovels()
     return () => { isMounted = false }

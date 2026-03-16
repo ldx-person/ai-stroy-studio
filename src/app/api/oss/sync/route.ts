@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { 
   listOSSNovels, 
-  getNovelFromOSS, 
+  getNovelMetaFromOSS,
   saveNovelToOSS,
   isOSSAvailable
 } from '@/lib/oss'
 
 /**
- * GET - 从OSS同步所有小说到本地数据库
+ * GET - 从OSS同步所有小说到本地数据库（只同步元数据和章节索引，不读取章节内容）
  */
 export async function GET() {
   try {
@@ -19,7 +19,7 @@ export async function GET() {
       }, { status: 500 })
     }
     
-    // 获取OSS中所有小说
+    // 获取OSS中所有小说元数据（快速，仅读取 novel.json）
     const ossNovels = await listOSSNovels()
     
     let syncedCount = 0
@@ -35,7 +35,7 @@ export async function GET() {
         })
         
         if (existingNovel) {
-          // 更新现有小说
+          // 更新现有小说元数据
           await db.novel.update({
             where: { id: novelMeta.id },
             data: {
@@ -61,21 +61,20 @@ export async function GET() {
           })
         }
         
-        // 获取完整数据
-        const fullData = await getNovelFromOSS(novelMeta.id)
+        // 获取元数据（不读取章节内容，只读取章节索引）
+        const metaData = await getNovelMetaFromOSS(novelMeta.id)
         
-        if (fullData) {
+        if (metaData) {
           // 更新简介
-          if (fullData.description) {
+          if (metaData.description) {
             await db.novel.update({
               where: { id: novelMeta.id },
-              data: { description: fullData.description }
+              data: { description: metaData.description }
             })
           }
           
-          // 同步章节
-          for (const chapter of fullData.chapters) {
-            // 处理可能缺少的字段
+          // 同步章节索引（不包含内容）
+          for (const chapter of metaData.chapters) {
             const chapterTitle = chapter.title || `第${(chapter.order || 0) + 1}章`
             
             const existingChapter = await db.chapter.findUnique({
@@ -87,7 +86,6 @@ export async function GET() {
                 where: { id: chapter.id },
                 data: {
                   title: chapterTitle,
-                  content: chapter.content || '',
                   wordCount: chapter.wordCount || 0,
                   order: chapter.order || 0,
                   isPublished: chapter.isPublished || false
@@ -99,7 +97,7 @@ export async function GET() {
                   id: chapter.id,
                   novelId: novelMeta.id,
                   title: chapterTitle,
-                  content: chapter.content || '',
+                  content: '',  // 内容按需加载
                   wordCount: chapter.wordCount || 0,
                   order: chapter.order || 0,
                   isPublished: chapter.isPublished || false,
