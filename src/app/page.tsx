@@ -997,45 +997,60 @@ export default function NovelWriterApp() {
     setIsGenerating(false)
   }
 
-  // Chapter List Component (reusable)
-  const ChapterListComponent = ({ inSheet = false }: { inSheet?: boolean }) => (
-    <div className={inSheet ? 'py-2' : ''}>
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold">{inSheet ? '章节目录' : ''}</h3>
-        <Dialog open={isCreatingChapter} onOpenChange={setIsCreatingChapter}>
+  // Chapter List Component (reusable). When hideHeaderRow, only list (desktop sidebar has 章节目录+新建 in CardHeader).
+  const ChapterListComponent = ({ inSheet = false, hideHeaderRow = false }: { inSheet?: boolean; hideHeaderRow?: boolean }) => (
+    <div className={inSheet ? 'py-2' : 'flex flex-col flex-1 min-h-0'}>
+      {!hideHeaderRow && (
+        <div className="flex items-center justify-between mb-3">
+          {inSheet && <h3 className="font-semibold">章节目录</h3>}
           <DialogTrigger asChild>
             <Button variant="ghost" size="sm" className="gap-1">
               <Plus className="w-4 h-4" />
               新建
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-sm">
-            <DialogHeader>
-              <DialogTitle>新建章节</DialogTitle>
-            </DialogHeader>
-            <div className="space-y-4 py-4">
-              <div className="space-y-2">
-                <Label htmlFor="chapter-title">章节标题</Label>
-                <Input
-                  id="chapter-title"
-                  placeholder="例如：第一章 初入江湖"
-                  value={newChapter.title}
-                  onChange={(e) => setNewChapter({ ...newChapter, title: e.target.value })}
-                />
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setIsCreatingChapter(false)}>取消</Button>
-              <Button onClick={handleCreateChapter} disabled={isLoading}>
-                {isLoading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-                创建
+        </div>
+      )}
+      {inSheet ? (
+        <ScrollArea className="h-[60vh]">
+          <div className="space-y-1">
+          {[...currentNovel?.chapters || []]
+            .sort((a, b) => a.order - b.order)
+            .map((chapter) => (
+            <div
+              key={chapter.id}
+              className={`group flex items-center gap-2 px-3 py-3 rounded-lg cursor-pointer transition-colors touch-manipulation ${
+                currentChapter?.id === chapter.id
+                  ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
+                  : 'hover:bg-muted active:bg-muted'
+              }`}
+              onClick={() => selectChapter(chapter)}
+            >
+              <FileText className="w-4 h-4 shrink-0" />
+              <span className="flex-1 truncate text-sm">{chapter.title}</span>
+              <span className="text-xs text-muted-foreground">{chapter.wordCount}字</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 opacity-0 group-hover:opacity-100 touch-manipulation"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleDeleteChapter(chapter.id)
+                }}
+              >
+                <Trash2 className="w-4 h-4 text-red-500" />
               </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      </div>
-      <ScrollArea className={inSheet ? 'h-[60vh]' : 'h-[calc(100%-60px)]'}>
-        <div className={inSheet ? 'space-y-1' : 'px-2 pb-2'}>
+            </div>
+          ))}
+          {currentNovel?.chapters.length === 0 && (
+            <div className="text-center py-8 text-muted-foreground text-sm">
+              暂无章节<br />点击上方新建
+            </div>
+          )}
+          </div>
+        </ScrollArea>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-2" style={{ minHeight: 0 }}>
           {[...currentNovel?.chapters || []]
             .sort((a, b) => a.order - b.order)
             .map((chapter) => (
@@ -1070,7 +1085,7 @@ export default function NovelWriterApp() {
             </div>
           )}
         </div>
-      </ScrollArea>
+      )}
     </div>
   )
 
@@ -1147,7 +1162,7 @@ export default function NovelWriterApp() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 container mx-auto px-4 py-4 md:py-6">
+      <main className="flex-1 flex flex-col min-h-0 container mx-auto px-4 py-4 md:py-6">
         {/* Novel List View */}
         {viewMode === 'list' && (
           <div className="space-y-4 md:space-y-6">
@@ -1605,21 +1620,28 @@ export default function NovelWriterApp() {
 
         {/* Editor View */}
         {viewMode === 'editor' && currentNovel && (
-          <div className="flex gap-4 h-[calc(100vh-180px)] md:h-[calc(100vh-140px)]">
-            {/* Desktop Sidebar - Chapter List */}
-            <div className="w-64 shrink-0 hidden md:block">
-              <Card className="h-full">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-base">章节目录</CardTitle>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <ChapterListComponent />
-                </CardContent>
-              </Card>
-            </div>
+          <Dialog open={isCreatingChapter} onOpenChange={setIsCreatingChapter}>
+            <div className="flex gap-4 min-h-0 flex-1 pb-6 md:pb-8">
+              {/* Desktop Sidebar - Chapter List */}
+              <div className="w-64 shrink-0 hidden md:flex md:flex-col md:min-h-0">
+                <Card className="h-full flex flex-col min-h-0">
+                  <CardHeader className="pb-2 shrink-0 flex flex-row items-center justify-between gap-2">
+                    <CardTitle className="text-base">章节目录</CardTitle>
+                    <DialogTrigger asChild>
+                      <Button variant="ghost" size="sm" className="gap-1 shrink-0">
+                        <Plus className="w-4 h-4" />
+                        新建
+                      </Button>
+                    </DialogTrigger>
+                  </CardHeader>
+                  <CardContent className="p-0 flex-1 flex flex-col min-h-0 overflow-hidden">
+                    <ChapterListComponent hideHeaderRow />
+                  </CardContent>
+                </Card>
+              </div>
 
             {/* Main Editor */}
-            <div className="flex-1 flex flex-col min-w-0">
+            <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-y-auto">
               {currentChapter ? (
                 <>
                   {/* Mobile Chapter Header */}
@@ -1693,7 +1715,7 @@ export default function NovelWriterApp() {
                         }}
                       />
                       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <span>{editingContent.length.toLocaleString()} 字</span>
+                        <span className="tabular-nums">{editingContent.length.toLocaleString()} 字</span>
                       </div>
                     </div>
                   )}
@@ -1891,6 +1913,30 @@ export default function NovelWriterApp() {
               )}
             </div>
           </div>
+          <DialogContent className="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>新建章节</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="chapter-title">章节标题</Label>
+                <Input
+                  id="chapter-title"
+                  placeholder="例如：第一章 初入江湖"
+                  value={newChapter.title}
+                  onChange={(e) => setNewChapter({ ...newChapter, title: e.target.value })}
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setIsCreatingChapter(false)}>取消</Button>
+              <Button onClick={handleCreateChapter} disabled={isLoading}>
+                {isLoading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                创建
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
         )}
       </main>
 
