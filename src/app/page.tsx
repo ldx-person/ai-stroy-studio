@@ -819,11 +819,30 @@ export default function NovelWriterApp() {
   }
 
   // Select chapter
-  const selectChapter = (chapter: Chapter) => {
-    setCurrentChapter(chapter)
-    setEditingContent(chapter.content)
-    setAiSuggestion('')
-    setShowChapterSheet(false)
+  const selectChapter = async (chapter: Chapter) => {
+    try {
+      let fullChapter = chapter
+
+      // 有些从目录或索引来的章节只有字数，没有正文，这里补一次拉取，避免出现「字数有、文本空白」
+      if (!chapter.content && chapter.wordCount > 0) {
+        const res = await fetch(`/api/chapters?id=${chapter.id}`)
+        const data = await res.json()
+        if (data.success && data.chapter) {
+          fullChapter = data.chapter as Chapter
+        }
+      }
+
+      setCurrentChapter(fullChapter)
+      setEditingContent(fullChapter.content || '')
+      setAiSuggestion('')
+      setShowChapterSheet(false)
+    } catch (error) {
+      console.error('Select chapter error:', error)
+      setCurrentChapter(chapter)
+      setEditingContent(chapter.content || '')
+      setAiSuggestion('')
+      setShowChapterSheet(false)
+    }
   }
 
   // Status badge color
@@ -1050,7 +1069,7 @@ export default function NovelWriterApp() {
           </div>
         </ScrollArea>
       ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-2" style={{ minHeight: 0 }}>
+        <div className="max-h-[70vh] overflow-y-auto px-2 pb-2">
           {[...currentNovel?.chapters || []]
             .sort((a, b) => a.order - b.order)
             .map((chapter) => (

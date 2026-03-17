@@ -14,10 +14,11 @@ const requestSchema = z.object({
   chapterCount: z.number().int().min(3).max(500)
 })
 
-// 生成批次大小
-const BATCH_SIZE = 3  // 每批生成章节数
-const WORDS_PER_CHAPTER_MIN = 1500  // 每章最少字数
-const WORDS_PER_CHAPTER_MAX = 8000  // 每章最多字数
+// 生成批次大小（一次生成少量章节，避免请求过长）
+const BATCH_SIZE = 3
+// 智能章节生成功能这里的目标是「给出每章的开头」，而不是整章全文
+// 因此只需要一个相对较短的篇幅
+const OPENING_WORDS_PER_CHAPTER = 100
 
 // 阶段划分比例
 const PHASE_RATIOS = {
@@ -212,7 +213,7 @@ ${phaseHint}${contextText}${charactersText}
 }
 
 /**
- * 生成章节内容
+ * 生成章节开头内容（约100字），用于给出大概方向，不是整章全文
  */
 async function generateChapterContent(
   title: string,
@@ -236,15 +237,14 @@ async function generateChapterContent(
 "${previousContent.slice(-300)}"`
     : ''
   
-  const systemPrompt = `你是一位专业的小说作家，擅长创作引人入胜的故事内容。
-请根据章节大纲创作小说内容，要求：
-1. 内容要丰富生动，有细节描写和情感表达
-2. 人物对话要自然，符合角色性格
-3. 场景描写要有画面感
-4. 情节发展要符合大纲，但可以适当展开
-5. 文末要有适当的悬念或过渡，为下一章铺垫
-6. 只输出小说正文内容，不要章节标题和其他说明
-7. 字数控制在${chapterPlan.estimatedWords - 200}-${chapterPlan.estimatedWords + 500}字`
+  const systemPrompt = `你是一位专业的小说作家，擅长为章节写出吸引人的开头。
+请根据章节大纲创作【本章的开头部分】，要求：
+1. 只写开头的第一个自然段或前几句，不要写完整章节
+2. 内容要有画面感和情绪张力，抓住读者
+3. 可以点出本章的矛盾或悬念，但不要完全展开
+4. 语言风格与前文保持一致
+5. 只输出小说正文内容，不要章节标题和其他说明
+6. 字数控制在约${OPENING_WORDS_PER_CHAPTER}字左右（可以略多或略少）`
 
   const userPrompt = `小说标题：${title}
 ${genreText}
@@ -326,15 +326,24 @@ export async function POST(request: NextRequest) {
     
     const { novelId, title, description, genre, totalWords, chapterCount } = validation.data
     
-    // 计算每章字数
-    let wordsPerChapter = Math.floor(totalWords / chapterCount)
-    wordsPerChapter = Math.max(WORDS_PER_CHAPTER_MIN, Math.min(WORDS_PER_CHAPTER_MAX, wordsPerChapter))
+    // 计算每章字数（这里只是用来控制大纲粒度，实际内容只生成开头）
+    const wordsPerChapter = Math.max(
+      OPENING_WORDS_PER_CHAPTER,
+      Math.floor(totalWords / chapterCount)
+    )
+    
+    // 读取当前已有章节，按 order 排序，用于决定从哪里开始生成
+    const existingChapters = await db.chapter.findMany({
+      where: { novelId },
+      orderBy: { order: 'asc' }
+    })
+    const existingCount = existingChapters.length
     
     // 初始化上下文
     const context: StoryContext = {
       summary: description,
       characters: [],
-      currentPlot: '',
+      currentPlot: existingChapters.length > 0 ? existingChapters[existingChapters.length - 1].title : '',
       recentSummaries: []
     }
     
@@ -347,26 +356,42 @@ export async function POST(request: NextRequest) {
       summary: string
     }> = []
     
-    let previousContent = ''
-    let totalGeneratedWords = 0
+    let previousContent = existingChapters.length > 0 ? existingChapters[existingChapters.length - 1].content || '' : ''
+    let totalGeneratedWords = existingChapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0)
     
     // Step 1: 生成故事结构
     console.log('生成故事结构...')
     const structure = await generateStoryStructure(title, description, genre, totalWords, chapterCount)
     
     // Step 2: 分批生成章节
-    const batches = Math.ceil(chapterCount / BATCH_SIZE)
+    const startIndex = existingCount
+    if (startIndex >= chapterCount) {
+      return NextResponse.json({
+        success: true,
+        message: '已有章节数量已达到或超过目标章节数，未生成新的章节开头',
+        totalChapters: existingCount,
+        totalWords: totalGeneratedWords,
+        chapters: existingChapters.map(ch => ({
+          index: ch.order,
+          title: ch.title,
+          wordCount: ch.wordCount
+        }))
+      })
+    }
+    
+    const remainingChapters = chapterCount - startIndex
+    const batches = Math.ceil(remainingChapters / BATCH_SIZE)
     
     for (let batch = 0; batch < batches; batch++) {
-      const startIndex = batch * BATCH_SIZE
-      const batchSize = Math.min(BATCH_SIZE, chapterCount - startIndex)
+      const batchStartIndex = startIndex + batch * BATCH_SIZE
+      const batchSize = Math.min(BATCH_SIZE, chapterCount - batchStartIndex)
       
-      console.log(`生成第 ${batch + 1}/${batches} 批章节大纲 (${startIndex + 1}-${startIndex + batchSize})...`)
+      console.log(`生成第 ${batch + 1}/${batches} 批章节大纲 (${batchStartIndex + 1}-${batchStartIndex + batchSize})...`)
       
       // 生成这批章节的大纲
       const chapterPlans = await generateBatchOutlines(
         title, description, genre, structure,
-        startIndex, batchSize, chapterCount, wordsPerChapter, context
+        batchStartIndex, batchSize, chapterCount, wordsPerChapter, context
       )
       
       // 逐章生成内容
@@ -413,11 +438,15 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // Step 3: 保存到数据库和OSS
-    console.log('保存章节到数据库...')
+    // Step 3: 只为缺失的章节追加「章节开头」，不覆盖已有章节
+    console.log('保存章节开头到数据库...')
     
     for (const result of results) {
-      // 创建章节记录
+      // 如果该 index 已经有章节，则跳过（不覆盖）
+      const exists = existingChapters.find(ch => ch.order === result.index)
+      if (exists) continue
+
+      // 创建章节记录，只保存开头内容
       const chapter = await db.chapter.create({
         data: {
           novelId,
@@ -441,7 +470,7 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // 更新小说字数
+    // 更新小说字数（包含原有章节+新生成的开头）
     await db.novel.update({
       where: { id: novelId },
       data: { wordCount: totalGeneratedWords }
