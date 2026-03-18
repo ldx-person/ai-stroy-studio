@@ -22,7 +22,7 @@ const AI_CONFIG = {
     'glm-5-turbo',
 
   // 默认基地址切换为 Z.AI 的 v4 Chat Completions 兼容接口
-  // 文档示例：POST https://api.z.ai/api/paas/v4/chat/completions
+  // 示例：POST https://api.z.ai/api/paas/v4/chat/completions
   baseUrl:
     process.env.ZAI_BASE_URL ||
     process.env.ALIYUN_AI_BASE_URL ||

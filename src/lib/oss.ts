@@ -78,7 +78,30 @@ export interface OSSNovelFull {
   description: string | null
   outline: unknown | null
   characters: OSSCharacterMeta[]
+  storyBible?: unknown | null
   chapters: Array<OSSChapterMeta & { content: string }>
+}
+
+// ==================== 作品档案（Story Bible） ====================
+
+const STORY_BIBLE_FILENAME = 'story_bible.json'
+
+export async function saveStoryBibleToOSS(novelId: string, storyBible: unknown): Promise<void> {
+  const client = getOSSClient()
+  await client.put(
+    `${NOVEL_PREFIX}/${novelId}/${STORY_BIBLE_FILENAME}`,
+    Buffer.from(JSON.stringify(storyBible ?? {}, null, 2), 'utf-8')
+  )
+}
+
+export async function getStoryBibleFromOSS(novelId: string): Promise<unknown | null> {
+  const client = getOSSClient()
+  try {
+    const result = await client.get(`${NOVEL_PREFIX}/${novelId}/${STORY_BIBLE_FILENAME}`)
+    return JSON.parse(result.content.toString('utf-8'))
+  } catch {
+    return null
+  }
 }
 
 // ==================== 小说完整数据操作 ====================

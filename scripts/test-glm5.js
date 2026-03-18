@@ -62,14 +62,18 @@ async function test() {
     process.exit(1)
   }
 
-  const content = data.choices?.[0]?.message?.content
-  if (!content) {
-    console.error('响应中无 content:', JSON.stringify(data, null, 2).slice(0, 500))
+  const message = data.choices?.[0]?.message
+  const content = message?.content?.trim()
+  const reasoning = message?.reasoning_content?.trim()
+  const output = content || reasoning
+
+  if (!output) {
+    console.error('响应中无可用输出(content/reasoning_content):', JSON.stringify(data, null, 2).slice(0, 500))
     process.exit(1)
   }
 
-  console.log('GLM-5-turbo 可用。')
-  console.log('模型回复:', content.trim())
+  console.log('GLM 测试调用成功。')
+  console.log('模型回复:', output)
   if (data.usage) {
     console.log('\nToken 使用:', data.usage)
   }

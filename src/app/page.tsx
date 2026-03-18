@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -124,6 +124,11 @@ export default function NovelWriterApp() {
   const [isAILoading, setIsAILoading] = useState(false)
   const [aiSuggestion, setAiSuggestion] = useState('')
   const [aiMode, setAiMode] = useState<'continue' | 'polish' | 'shorten' | 'expand'>('continue')
+  const [aiVariants, setAiVariants] = useState<1 | 3 | 5>(1)
+  const [aiCandidates, setAiCandidates] = useState<string[]>([])
+  const [diffCandidateIndex, setDiffCandidateIndex] = useState<number | null>(null)
+  const [selectionRange, setSelectionRange] = useState<{ start: number; end: number } | null>(null)
+  const editorRef = useRef<HTMLTextAreaElement | null>(null)
   
   // Form states
   const [newNovel, setNewNovel] = useState({ title: '', description: '', genre: '' })
@@ -489,21 +494,24 @@ export default function NovelWriterApp() {
     
     setIsAILoading(true)
     setAiSuggestion('')
+    setAiCandidates([])
+    setAiMode('continue')
     
     try {
-      const res = await fetch('/api/ai/continue', {
+      const res = await fetch('/api/ai/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: editingContent,
-          novelTitle: currentNovel.title,
-          chapterTitle: currentChapter?.title,
-          genre: currentNovel.genre
+          action: 'continue',
+          input: { scope: 'chapter', text: editingContent },
+          options: { variants: aiVariants, length: aiVariants === 1 ? '100' : '300' }
         })
       })
       const data = await res.json()
       if (data.success) {
-        setAiSuggestion(data.suggestion)
+        const candidates = (data.candidates || []).map((c: { text: string }) => c.text).filter(Boolean)
+        if (candidates.length <= 1) setAiSuggestion(candidates[0] || '')
+        else setAiCandidates(candidates)
         toast({ title: 'AI续写建议已生成！' })
       } else {
         toast({ title: data.error || 'AI生成失败', variant: 'destructive' })
@@ -522,26 +530,28 @@ export default function NovelWriterApp() {
     }
     
     setIsAILoading(true)
+    setAiMode('continue')
     
     try {
-      const res = await fetch('/api/ai/title', {
+      const res = await fetch('/api/ai/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: editingContent })
+        body: JSON.stringify({ action: 'title', input: { scope: 'chapter', text: editingContent }, options: { variants: 1 } })
       })
       const data = await res.json()
-      if (data.success && currentChapter) {
+      const title = data?.candidates?.[0]?.text?.trim()
+      if (data.success && currentChapter && title) {
         const res2 = await fetch('/api/chapters', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             id: currentChapter.id,
-            title: data.title
+            title
           })
         })
         const data2 = await res2.json()
         if (data2.success) {
-          const updatedChapter = { ...currentChapter, title: data.title }
+          const updatedChapter = { ...currentChapter, title }
           setCurrentChapter(updatedChapter)
           if (currentNovel) {
             const updatedChapters = currentNovel.chapters.map(ch => 
@@ -565,33 +575,119 @@ export default function NovelWriterApp() {
     setAiSuggestion('')
   }
 
+  const applyCandidate = (text: string, mode: 'replace' | 'insert') => {
+    const range = selectionRange
+    if (!range || range.start === range.end) {
+      if (mode === 'insert') {
+        setEditingContent((prev) => prev + (prev ? '\n\n' : '') + text)
+      } else {
+        setEditingContent(text)
+      }
+      return
+    }
+    setEditingContent((prev) => {
+      const before = prev.slice(0, range.start)
+      const after = prev.slice(range.end)
+      const next = mode === 'insert' ? before + text + after : before + text + after
+      return next
+    })
+  }
+
   const handleAIRefine = async (mode: 'polish' | 'shorten' | 'expand') => {
-    const content = editingContent.trim()
-    if (!content) {
-      toast({ title: '请先输入一些内容', variant: 'destructive' })
+    const raw = editingContent
+    const range = selectionRange
+    const hasSelection = !!range && range.start !== range.end
+    const text = hasSelection ? raw.slice(range!.start, range!.end).trim() : raw.trim()
+
+    if (!text) {
+      toast({ title: hasSelection ? '请先选中一些内容' : '请先输入一些内容', variant: 'destructive' })
       return
     }
 
     setIsAILoading(true)
     setAiMode(mode)
+    setAiSuggestion('')
+    setAiCandidates([])
     try {
-      const res = await fetch('/api/ai/refine', {
+      const res = await fetch('/api/ai/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content, mode }),
+        body: JSON.stringify({
+          action: 'rewrite',
+          input: { scope: hasSelection ? 'selection' : 'chapter', text },
+          options: { mode, variants: aiVariants },
+        }),
       })
       const data = await res.json()
       if (!data.success) {
         toast({ title: data.error || 'AI 优化失败', variant: 'destructive' })
         return
       }
-      setAiSuggestion(data.result)
+      const candidates = (data.candidates || []).map((c: { text: string }) => c.text).filter(Boolean)
+      if (candidates.length <= 1) {
+        setAiSuggestion(candidates[0] || '')
+      } else {
+        setAiCandidates(candidates)
+      }
     } catch (error) {
-      console.error('AI refine error:', error)
+      console.error('AI action error:', error)
       toast({ title: 'AI 优化失败', variant: 'destructive' })
     }
     setIsAILoading(false)
   }
+
+  const handleAIDescribe = async (subAction: 'environment' | 'emotion' | 'action' | 'dialogue') => {
+    const raw = editingContent
+    const range = selectionRange
+    const hasSelection = !!range && range.start !== range.end
+    const text = hasSelection ? raw.slice(range!.start, range!.end).trim() : raw.trim()
+
+    if (!text) {
+      toast({ title: hasSelection ? '请先选中一些内容' : '请先输入一些内容', variant: 'destructive' })
+      return
+    }
+
+    setIsAILoading(true)
+    setAiMode('continue')
+    setAiSuggestion('')
+    setAiCandidates([])
+    try {
+      const res = await fetch('/api/ai/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'describe',
+          input: { scope: hasSelection ? 'selection' : 'chapter', text },
+          options: { subAction, variants: aiVariants, length: aiVariants === 1 ? '100' : '300' },
+        }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        toast({ title: data.error || 'AI 优化失败', variant: 'destructive' })
+        return
+      }
+      const candidates = (data.candidates || []).map((c: { text: string }) => c.text).filter(Boolean)
+      if (candidates.length <= 1) {
+        setAiSuggestion(candidates[0] || '')
+      } else {
+        setAiCandidates(candidates)
+      }
+    } catch (error) {
+      console.error('AI describe error:', error)
+      toast({ title: 'AI 描写增强失败', variant: 'destructive' })
+    }
+    setIsAILoading(false)
+  }
+
+  // Get original text for diff (selection or full chapter)
+  const getDiffOriginalText = useCallback(() => {
+    const range = selectionRange
+    const hasSelection = !!range && range.start !== range.end
+    if (hasSelection) {
+      return editingContent.slice(range!.start, range!.end)
+    }
+    return editingContent
+  }, [editingContent, selectionRange])
 
   // Calculate total word count
   const getTotalWordCount = (novel: Novel) => {
@@ -1762,10 +1858,38 @@ export default function NovelWriterApp() {
                         className="h-full max-h-[70vh] min-h-[40vh] overflow-y-auto resize-none text-base leading-relaxed"
                         value={editingContent}
                         onChange={(e) => setEditingContent(e.target.value)}
+                        ref={editorRef}
+                        onSelect={(e) => {
+                          const target = e.target as HTMLTextAreaElement
+                          setSelectionRange({ start: target.selectionStart, end: target.selectionEnd })
+                        }}
                       />
                     </TabsContent>
                     
                     <TabsContent value="ai" className="flex-1 mt-3 md:mt-4 space-y-3 md:space-y-4 overflow-y-auto">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs text-muted-foreground">
+                          {selectionRange && selectionRange.start !== selectionRange.end
+                            ? `已选中 ${selectionRange.end - selectionRange.start} 字符`
+                            : '未选中内容（默认作用于整章）'}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">候选</span>
+                          <Select
+                            value={String(aiVariants)}
+                            onValueChange={(v) => setAiVariants((Number(v) as 1 | 3 | 5) || 1)}
+                          >
+                            <SelectTrigger className="h-8 w-[88px]">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1">1</SelectItem>
+                              <SelectItem value="3">3</SelectItem>
+                              <SelectItem value="5">5</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
                       <div className="grid grid-cols-2 gap-2 md:gap-3">
                         <Button 
                           variant="outline" 
@@ -1829,22 +1953,49 @@ export default function NovelWriterApp() {
                             保留重点，压缩篇幅
                           </span>
                         </Button>
-                        <Button
-                          variant="outline"
-                          className="h-auto py-3 md:py-4 flex flex-col gap-1 touch-manipulation col-span-2"
-                          onClick={() => handleAIRefine('expand')}
-                          disabled={isAILoading}
-                        >
-                          {isAILoading && aiMode === 'expand' ? (
-                            <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
-                          ) : (
-                            <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-pink-500" />
-                          )}
-                          <span className="text-xs md:text-sm">细节扩写</span>
-                          <span className="text-[10px] md:text-xs text-muted-foreground hidden md:block">
-                            加强场景、情绪和对话细节
-                          </span>
-                        </Button>
+                      </div>
+
+                      {/* 描写增强 - 4 个细分动作 */}
+                      <div className="space-y-1">
+                        <div className="text-xs text-muted-foreground">描写增强（选中内容）</div>
+                        <div className="grid grid-cols-2 gap-2 md:gap-3">
+                          <Button
+                            variant="outline"
+                            className="h-auto py-2 md:py-3 flex flex-col gap-0.5 touch-manipulation"
+                            onClick={() => handleAIDescribe('environment')}
+                            disabled={isAILoading}
+                          >
+                            <span className="text-xs md:text-sm">🌿 环境</span>
+                            <span className="text-[10px] text-muted-foreground hidden md:block">天气、光线、氛围</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="h-auto py-2 md:py-3 flex flex-col gap-0.5 touch-manipulation"
+                            onClick={() => handleAIDescribe('emotion')}
+                            disabled={isAILoading}
+                          >
+                            <span className="text-xs md:text-sm">💭 情绪</span>
+                            <span className="text-[10px] text-muted-foreground hidden md:block">内心、表情、张力</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="h-auto py-2 md:py-3 flex flex-col gap-0.5 touch-manipulation"
+                            onClick={() => handleAIDescribe('action')}
+                            disabled={isAILoading}
+                          >
+                            <span className="text-xs md:text-sm">⚡ 动作</span>
+                            <span className="text-[10px] text-muted-foreground hidden md:block">分解、节奏、画面</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="h-auto py-2 md:py-3 flex flex-col gap-0.5 touch-manipulation"
+                            onClick={() => handleAIDescribe('dialogue')}
+                            disabled={isAILoading}
+                          >
+                            <span className="text-xs md:text-sm">💬 对话</span>
+                            <span className="text-[10px] text-muted-foreground hidden md:block">语气、潜台词、节奏</span>
+                          </Button>
+                        </div>
                       </div>
                       
                       {aiSuggestion && (
@@ -1867,6 +2018,56 @@ export default function NovelWriterApp() {
                             </div>
                           </CardContent>
                         </Card>
+                      )}
+
+                      {aiCandidates.length > 0 && (
+                        <div className="space-y-3">
+                          {aiCandidates.map((c, idx) => (
+                            <Card key={idx} className="border-amber-200/60">
+                              <CardHeader className="pb-2">
+                                <CardTitle className="text-sm">候选 {idx + 1}</CardTitle>
+                              </CardHeader>
+                              <CardContent>
+                                {diffCandidateIndex === idx ? (
+                                  <DiffView original={getDiffOriginalText()} candidate={c} onClose={() => setDiffCandidateIndex(null)} />
+                                ) : (
+                                  <>
+                                    <p className="text-sm whitespace-pre-wrap mb-3">{c}</p>
+                                    <div className="flex gap-2 flex-wrap">
+                                      <Button
+                                        size="sm"
+                                        onClick={() => {
+                                          applyCandidate(c, 'replace')
+                                          setAiCandidates([])
+                                          setDiffCandidateIndex(null)
+                                        }}
+                                      >
+                                        替换
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => {
+                                          applyCandidate(c, 'insert')
+                                          setAiCandidates([])
+                                          setDiffCandidateIndex(null)
+                                        }}
+                                      >
+                                        插入
+                                      </Button>
+                                      <Button size="sm" variant="ghost" onClick={() => setDiffCandidateIndex(idx)}>
+                                        对比
+                                      </Button>
+                                      <Button size="sm" variant="ghost" onClick={() => navigator.clipboard?.writeText(c)}>
+                                        复制
+                                      </Button>
+                                    </div>
+                                  </>
+                                )}
+                              </CardContent>
+                            </Card>
+                          ))}
+                        </div>
                       )}
                     </TabsContent>
 
@@ -2015,6 +2216,73 @@ export default function NovelWriterApp() {
       )}
 
       <Toaster />
+    </div>
+  )
+}
+
+// Simple diff view component (inline for now, can be extracted to separate file)
+function DiffView({ original, candidate, onClose }: { original: string; candidate: string; onClose: () => void }) {
+  const diffParts = useMemo(() => {
+    // Simple word-level diff visualization
+    const origWords = original.split(/(\s+)/)
+    const candWords = candidate.split(/(\s+)/)
+    const maxLen = Math.max(origWords.length, candWords.length)
+    const parts: { type: 'same' | 'removed' | 'added'; text: string }[] = []
+
+    for (let i = 0; i < maxLen; i++) {
+      const o = origWords[i] || ''
+      const c = candWords[i] || ''
+      if (o === c && o) {
+        if (parts.length > 0 && parts[parts.length - 1].type === 'same') {
+          parts[parts.length - 1].text += o
+        } else {
+          parts.push({ type: 'same', text: o })
+        }
+      } else {
+        if (o) {
+          if (parts.length > 0 && parts[parts.length - 1].type === 'removed') {
+            parts[parts.length - 1].text += o
+          } else {
+            parts.push({ type: 'removed', text: o })
+          }
+        }
+        if (c) {
+          if (parts.length > 0 && parts[parts.length - 1].type === 'added') {
+            parts[parts.length - 1].text += c
+          } else {
+            parts.push({ type: 'added', text: c })
+          }
+        }
+      }
+    }
+    return parts
+  }, [original, candidate])
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">对比视图（绿色=新增，红色=删除）</span>
+        <Button size="sm" variant="ghost" onClick={onClose}>关闭对比</Button>
+      </div>
+      <div className="text-sm whitespace-pre-wrap leading-relaxed bg-slate-50 dark:bg-slate-950 p-3 rounded-md max-h-[40vh] overflow-y-auto">
+        {diffParts.map((part, i) => (
+          <span
+            key={i}
+            className={
+              part.type === 'removed'
+                ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 line-through decoration-red-400'
+                : part.type === 'added'
+                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                  : ''
+            }
+          >
+            {part.text}
+          </span>
+        ))}
+      </div>
+      <div className="text-xs text-muted-foreground">
+        原文 {original.length} 字 → 候选 {candidate.length} 字
+      </div>
     </div>
   )
 }
