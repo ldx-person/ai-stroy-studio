@@ -130,6 +130,17 @@ export default function NovelWriterApp() {
   const [selectionRange, setSelectionRange] = useState<{ start: number; end: number } | null>(null)
   const editorRef = useRef<HTMLTextAreaElement | null>(null)
   
+  // Outline states (P2-1)
+  const [storyOutline, setStoryOutline] = useState<StoryOutline | null>(null)
+  const [showOutlinePanel, setShowOutlinePanel] = useState(false)
+  const [editingOutlineChapter, setEditingOutlineChapter] = useState<number | null>(null)
+  const [batchGenerating, setBatchGenerating] = useState(false)
+  
+  // Revision history states (P2-2)
+  const [chapterRevisions, setChapterRevisions] = useState<Array<{id: string, content: string, wordCount: number, source: string, createdAt: string}>>([])
+  const [showRevisions, setShowRevisions] = useState(false)
+  const [loadingRevisions, setLoadingRevisions] = useState(false)
+  
   // Form states
   const [newNovel, setNewNovel] = useState({ title: '', description: '', genre: '' })
   const [newChapter, setNewChapter] = useState({ title: '' })
@@ -569,14 +580,40 @@ export default function NovelWriterApp() {
   }
 
   // Apply AI suggestion
+  // Save revision history (P2-2)
+  const saveRevision = async (source: string, metadata?: Record<string, unknown>) => {
+    if (!currentChapter) return
+    try {
+      await fetch('/api/chapters/revisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chapterId: currentChapter.id,
+          content: editingContent,
+          wordCount: editingContent.length,
+          source,
+          metadata,
+        }),
+      })
+    } catch (error) {
+      console.error('Save revision failed:', error)
+    }
+  }
+
   const applySuggestion = () => {
-    if (!aiSuggestion) return
+    if (!aiSuggestion || !currentChapter) return
+    // Save current content as revision before applying
+    saveRevision('ai_apply', { action: 'apply_suggestion' })
     setEditingContent(aiSuggestion)
     setAiSuggestion('')
   }
 
-  const applyCandidate = (text: string, mode: 'replace' | 'insert') => {
+  const applyCandidate = (text: string, mode: 'replace' | 'insert', source: string = 'ai_candidate') => {
+    if (!currentChapter) return
     const range = selectionRange
+    // Save current content as revision before applying
+    saveRevision(source, { mode, hasSelection: !!range && range.start !== range.end })
+    
     if (!range || range.start === range.end) {
       if (mode === 'insert') {
         setEditingContent((prev) => prev + (prev ? '\n\n' : '') + text)
@@ -711,6 +748,139 @@ export default function NovelWriterApp() {
       setEditingContent(nextChapter.content)
     }
     setShowChapterSheet(false)
+  }
+
+  // Outline Functions (P2-1)
+  const generateOutline = async () => {
+    if (!currentNovel) return
+    setIsLoading(true)
+    try {
+      const res = await fetch('/api/ai/generate-outline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: currentNovel.title,
+          description: currentNovel.description || '',
+          genre: currentNovel.genre,
+          totalWords: 100000,
+          chapterCount: 20
+        })
+      })
+      const data = await res.json()
+      if (data.success) {
+        setStoryOutline(data.outline)
+        setShowOutlinePanel(true)
+        toast({ title: '大纲生成成功！' })
+      } else {
+        toast({ title: data.error || '生成大纲失败', variant: 'destructive' })
+      }
+    } catch (error) {
+      toast({ title: '生成大纲失败', variant: 'destructive' })
+    }
+    setIsLoading(false)
+  }
+
+  const updateOutlineChapter = (index: number, updates: Partial<ChapterOutline>) => {
+    if (!storyOutline) return
+    const newChapters = [...storyOutline.chapters]
+    newChapters[index] = { ...newChapters[index], ...updates }
+    setStoryOutline({ ...storyOutline, chapters: newChapters })
+  }
+
+  const generateChapterOpening = async (chapterIndex: number) => {
+    if (!storyOutline || !currentNovel) return
+    const chapter = storyOutline.chapters[chapterIndex]
+    setIsAILoading(true)
+    try {
+      const res = await fetch('/api/ai/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'opening',
+          novelId: currentNovel.id,
+          input: { scope: 'chapter', text: `${chapter.title}\n${chapter.outline}` },
+          options: { variants: 1, length: '100' }
+        })
+      })
+      const data = await res.json()
+      if (data.success && data.candidates?.[0]?.text) {
+        // Create new chapter with the generated opening
+        const res2 = await fetch('/api/chapters', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            novelId: currentNovel.id,
+            title: chapter.title,
+            order: chapterIndex,
+            content: data.candidates[0].text
+          })
+        })
+        const data2 = await res2.json()
+        if (data2.success) {
+          const updatedNovel = { ...currentNovel, chapters: [...currentNovel.chapters, data2.chapter] }
+          setCurrentNovel(updatedNovel)
+          toast({ title: `第${chapterIndex + 1}章开头已生成` })
+        }
+      }
+    } catch (error) {
+      toast({ title: '生成开头失败', variant: 'destructive' })
+    }
+    setIsAILoading(false)
+  }
+
+  const batchGenerateOpenings = async () => {
+    if (!storyOutline || !currentNovel) return
+    setBatchGenerating(true)
+    const chapters = storyOutline.chapters
+    for (let i = 0; i < chapters.length; i++) {
+      // Check if chapter already exists
+      const exists = currentNovel.chapters.find(ch => ch.order === i)
+      if (exists) continue
+      
+      await generateChapterOpening(i)
+      // Delay between requests to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1500))
+    }
+    setBatchGenerating(false)
+    toast({ title: '批量生成完成！' })
+  }
+
+  // Revision History Functions (P2-2)
+  const loadChapterRevisions = async () => {
+    if (!currentChapter) return
+    setLoadingRevisions(true)
+    try {
+      const res = await fetch(`/api/chapters/revisions?chapterId=${currentChapter.id}`)
+      const data = await res.json()
+      if (data.success) {
+        setChapterRevisions(data.revisions || [])
+        setShowRevisions(true)
+      }
+    } catch (error) {
+      console.error('Load revisions failed:', error)
+    }
+    setLoadingRevisions(false)
+  }
+
+  const restoreRevision = async (revisionId: string) => {
+    try {
+      const res = await fetch('/api/chapters/revisions', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revisionId }),
+      })
+      const data = await res.json()
+      if (data.success && data.chapter) {
+        setEditingContent(data.chapter.content)
+        toast({ title: '已恢复到历史版本' })
+        // Refresh revisions
+        loadChapterRevisions()
+      } else {
+        toast({ title: '恢复失败', variant: 'destructive' })
+      }
+    } catch (error) {
+      toast({ title: '恢复失败', variant: 'destructive' })
+    }
   }
 
   // TTS Functions
@@ -1830,6 +2000,16 @@ export default function NovelWriterApp() {
                         }}
                       />
                       <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Button 
+                          size="sm" 
+                          variant="ghost" 
+                          className="h-8 gap-1"
+                          onClick={loadChapterRevisions}
+                          disabled={loadingRevisions}
+                        >
+                          {loadingRevisions ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookMarked className="w-4 h-4" />}
+                          历史版本
+                        </Button>
                         <span className="tabular-nums">{editingContent.length.toLocaleString()} 字</span>
                       </div>
                     </div>
@@ -1849,6 +2029,10 @@ export default function NovelWriterApp() {
                       <TabsTrigger value="tts" className="gap-1 md:gap-2 text-xs md:text-sm">
                         <Volume2 className="w-3 h-3 md:w-4 md:h-4" />
                         语音
+                      </TabsTrigger>
+                      <TabsTrigger value="outline" className="gap-1 md:gap-2 text-xs md:text-sm">
+                        <BookOpen className="w-3 h-3 md:w-4 md:h-4" />
+                        大纲
                       </TabsTrigger>
                     </TabsList>
                     
@@ -2037,7 +2221,7 @@ export default function NovelWriterApp() {
                                       <Button
                                         size="sm"
                                         onClick={() => {
-                                          applyCandidate(c, 'replace')
+                                          applyCandidate(c, 'replace', `ai_${aiMode}`)
                                           setAiCandidates([])
                                           setDiffCandidateIndex(null)
                                         }}
@@ -2048,7 +2232,7 @@ export default function NovelWriterApp() {
                                         size="sm"
                                         variant="outline"
                                         onClick={() => {
-                                          applyCandidate(c, 'insert')
+                                          applyCandidate(c, 'insert', `ai_${aiMode}`)
                                           setAiCandidates([])
                                           setDiffCandidateIndex(null)
                                         }}
@@ -2073,6 +2257,91 @@ export default function NovelWriterApp() {
 
                     <TabsContent value="tts" className="flex-1 mt-3 md:mt-4 overflow-y-auto">
                       <TTSPlayer content={editingContent} disabled={!editingContent.trim()} />
+                    </TabsContent>
+
+                    <TabsContent value="outline" className="flex-1 mt-3 md:mt-4 overflow-y-auto">
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h3 className="font-semibold">故事大纲</h3>
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="outline" onClick={generateOutline} disabled={isLoading}>
+                              {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                              生成大纲
+                            </Button>
+                            {storyOutline && (
+                              <Button size="sm" variant="outline" onClick={batchGenerateOpenings} disabled={batchGenerating}>
+                                {batchGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                                批量生成开头
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                        
+                        {storyOutline ? (
+                          <div className="space-y-4">
+                            <Card className="bg-slate-50 dark:bg-slate-950">
+                              <CardContent className="p-4 space-y-2">
+                                <div className="text-sm font-medium">故事结构</div>
+                                <div className="text-xs text-muted-foreground space-y-1">
+                                  <p><span className="font-medium text-blue-600">开头：</span>{storyOutline.beginning?.slice(0, 100)}...</p>
+                                  <p><span className="font-medium text-amber-600">经过：</span>{storyOutline.middle?.slice(0, 100)}...</p>
+                                  <p><span className="font-medium text-green-600">结尾：</span>{storyOutline.ending?.slice(0, 100)}...</p>
+                                </div>
+                              </CardContent>
+                            </Card>
+                            
+                            <div className="space-y-2">
+                              <div className="text-sm font-medium">章节列表</div>
+                              <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+                                {storyOutline.chapters?.map((ch, idx) => (
+                                  <Card key={idx} className="border-l-4 border-l-amber-400">
+                                    <CardContent className="p-3">
+                                      <div className="flex items-start justify-between gap-2">
+                                        <div className="flex-1 min-w-0">
+                                          <div className="text-sm font-medium mb-1">
+                                            第{idx + 1}章 {editingOutlineChapter === idx ? (
+                                              <Input
+                                                value={ch.title}
+                                                onChange={(e) => updateOutlineChapter(idx, { title: e.target.value })}
+                                                onBlur={() => setEditingOutlineChapter(null)}
+                                                className="inline-block w-48 h-7 text-sm"
+                                                autoFocus
+                                              />
+                                            ) : (
+                                              <span onClick={() => setEditingOutlineChapter(idx)} className="cursor-pointer hover:text-amber-600">
+                                                {ch.title}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="text-xs text-muted-foreground line-clamp-2">{ch.outline}</div>
+                                        </div>
+                                        <div className="flex gap-1 shrink-0">
+                                          <Button 
+                                            size="sm" 
+                                            variant="ghost" 
+                                            className="h-7 w-7 p-0"
+                                            onClick={() => generateChapterOpening(idx)}
+                                            disabled={isAILoading || currentNovel?.chapters?.some(c => c.order === idx)}
+                                            title="生成开头"
+                                          >
+                                            <Sparkles className="w-4 h-4" />
+                                          </Button>
+                                        </div>
+                                      </div>
+                                    </CardContent>
+                                  </Card>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-center py-8 text-muted-foreground">
+                            <BookOpen className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                            <p className="text-sm">暂无大纲</p>
+                            <p className="text-xs mt-1">点击上方"生成大纲"按钮创建故事结构</p>
+                          </div>
+                        )}
+                      </div>
                     </TabsContent>
                   </Tabs>
 
@@ -2214,6 +2483,70 @@ export default function NovelWriterApp() {
           </div>
         </footer>
       )}
+
+      {/* Chapter Revision History Dialog (P2-2) */}
+      <Dialog open={showRevisions} onOpenChange={setShowRevisions}>
+        <DialogContent className="sm:max-w-2xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle>章节历史版本</DialogTitle>
+            <DialogDescription>
+              {currentChapter?.title} - 共 {chapterRevisions.length} 个历史版本
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 mt-4 max-h-[60vh] overflow-y-auto">
+            {chapterRevisions.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <BookMarked className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                <p className="text-sm">暂无历史版本</p>
+                <p className="text-xs mt-1">每次 AI 修改都会自动保存历史版本</p>
+              </div>
+            ) : (
+              chapterRevisions.map((rev, idx) => (
+                <Card key={rev.id} className="border-l-4 border-l-blue-400">
+                  <CardContent className="p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-sm font-medium">版本 {chapterRevisions.length - idx}</span>
+                          <Badge variant="secondary" className="text-xs">
+                            {rev.source === 'ai_continue' && 'AI续写'}
+                            {rev.source === 'ai_polish' && '润色'}
+                            {rev.source === 'ai_shorten' && '精简'}
+                            {rev.source === 'ai_expand' && '扩写'}
+                            {rev.source === 'ai_describe' && '细节描写'}
+                            {rev.source === 'manual' && '手动编辑'}
+                            {rev.source === 'ai_apply' && 'AI建议'}
+                            {rev.source === 'ai_candidate' && 'AI候选'}
+                            {rev.source === 'restore' && '恢复版本'}
+                            {!['ai_continue', 'ai_polish', 'ai_shorten', 'ai_expand', 'ai_describe', 'manual', 'ai_apply', 'ai_candidate', 'restore'].includes(rev.source) && rev.source}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">
+                            {new Date(rev.createdAt).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <div className="text-xs text-muted-foreground line-clamp-3">
+                          {rev.content.slice(0, 150)}{rev.content.length > 150 ? '...' : ''}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                          {rev.wordCount} 字
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => restoreRevision(rev.id)}
+                        disabled={loadingRevisions}
+                      >
+                        恢复此版本
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Toaster />
     </div>

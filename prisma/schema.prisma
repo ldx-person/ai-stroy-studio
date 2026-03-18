@@ -32,20 +32,36 @@ model Novel {
 
 // 章节表
 model Chapter {
-  id           String   @id @default(cuid())
+  id           String            @id @default(cuid())
   novelId      String
-  novel        Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  novel        Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
   title        String
-  content      String   @default("") // 章节内容（本地存储的简短内容）
-  contentOss   String?  // 章节内容OSS路径
-  wordCount    Int      @default(0) // 章节字数
-  order        Int      @default(0) // 章节顺序
-  isPublished  Boolean  @default(false) // 是否发布
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  content      String            @default("") // 章节内容（本地存储的简短内容）
+  contentOss   String?           // 章节内容OSS路径
+  wordCount    Int               @default(0) // 章节字数
+  order        Int               @default(0) // 章节顺序
+  isPublished  Boolean           @default(false) // 是否发布
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  revisions    ChapterRevision[] // 版本历史
 
   @@index([novelId])
   @@map("chapters")
+}
+
+// 章节版本历史表 (P2-2: 章节卡版本化)
+model ChapterRevision {
+  id          String   @id @default(cuid())
+  chapterId   String
+  chapter     Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  content     String   // 修改前的内容
+  wordCount   Int      // 修改前的字数
+  source      String   // 修改来源: 'ai_rewrite', 'ai_continue', 'ai_describe', 'manual', etc.
+  metadata    String?  // JSON 字符串，存储额外信息（如 AI 动作参数）
+  createdAt   DateTime @default(now())
+
+  @@index([chapterId])
+  @@map("chapter_revisions")
 }
 
 // 角色表
