@@ -73,38 +73,41 @@ export async function GET() {
             })
           }
           
-          // 同步章节索引（不包含内容）
+          // 同步章节索引（不包含内容），单章失败不影响其他章节
           for (const chapter of metaData.chapters) {
-            const chapterTitle = chapter.title || `第${(chapter.order || 0) + 1}章`
-            
-            const existingChapter = await db.chapter.findUnique({
-              where: { id: chapter.id }
-            })
-            
-            if (existingChapter) {
-              await db.chapter.update({
-                where: { id: chapter.id },
-                data: {
-                  title: chapterTitle,
-                  wordCount: chapter.wordCount || 0,
-                  order: chapter.order || 0,
-                  isPublished: chapter.isPublished || false
-                }
+            try {
+              const chapterTitle = chapter.title || `第${(chapter.order || 0) + 1}章`
+              const existingChapter = await db.chapter.findUnique({
+                where: { id: chapter.id }
               })
-            } else {
-              await db.chapter.create({
-                data: {
-                  id: chapter.id,
-                  novelId: novelMeta.id,
-                  title: chapterTitle,
-                  content: '',  // 内容按需加载
-                  wordCount: chapter.wordCount || 0,
-                  order: chapter.order || 0,
-                  isPublished: chapter.isPublished || false,
-                  createdAt: new Date(chapter.createdAt || Date.now()),
-                  updatedAt: new Date(chapter.updatedAt || Date.now())
-                }
-              })
+              
+              if (existingChapter) {
+                await db.chapter.update({
+                  where: { id: chapter.id },
+                  data: {
+                    title: chapterTitle,
+                    wordCount: chapter.wordCount || 0,
+                    order: chapter.order || 0,
+                    isPublished: chapter.isPublished || false
+                  }
+                })
+              } else {
+                await db.chapter.create({
+                  data: {
+                    id: chapter.id,
+                    novelId: novelMeta.id,
+                    title: chapterTitle,
+                    content: '',  // 内容按需加载
+                    wordCount: chapter.wordCount || 0,
+                    order: chapter.order || 0,
+                    isPublished: chapter.isPublished || false,
+                    createdAt: new Date(chapter.createdAt || Date.now()),
+                    updatedAt: new Date(chapter.updatedAt || Date.now())
+                  }
+                })
+              }
+            } catch (chErr) {
+              console.error(`同步章节 ${chapter.id} 失败:`, chErr)
             }
           }
         }
