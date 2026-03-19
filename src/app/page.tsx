@@ -38,7 +38,8 @@ import {
   X,
   Wand2,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  SearchCheck
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -181,6 +182,18 @@ export default function NovelWriterApp() {
     progress: 0,
     structure: null as { beginning: string; middle: string; ending: string } | null
   })
+
+  // Chapter check states
+  const [showChapterCheck, setShowChapterCheck] = useState(false)
+  const [chapterCheckNovel, setChapterCheckNovel] = useState<Novel | null>(null)
+  const [chapterCheckResult, setChapterCheckResult] = useState<{
+    duplicates: Array<{ order: number; chapters: Array<{ id: string; title: string; wordCount: number; contentPreview: string }> }>
+    gaps: number[]
+    range: { start: number; end: number }
+  } | null>(null)
+  const [chapterCheckLoading, setChapterCheckLoading] = useState(false)
+  const [chapterCheckFilling, setChapterCheckFilling] = useState(false)
+  const [duplicateSelections, setDuplicateSelections] = useState<Record<string, string>>({}) // order -> id to keep
   
   // Edit novel states
   const [isEditingNovel, setIsEditingNovel] = useState(false)
@@ -1313,6 +1326,101 @@ export default function NovelWriterApp() {
     setIsGenerating(false)
   }
 
+  // Chapter Check - 检测重复与缺失
+  const handleChapterCheck = async () => {
+    if (!chapterCheckNovel) return
+    setChapterCheckLoading(true)
+    setChapterCheckResult(null)
+    setDuplicateSelections({})
+    try {
+      const res = await fetch('/api/chapters/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ novelId: chapterCheckNovel.id })
+      })
+      const data = await res.json()
+      if (data.success) {
+        setChapterCheckResult({ duplicates: data.duplicates, gaps: data.gaps, range: data.range })
+        data.duplicates?.forEach((d: { order: number; chapters: { id: string }[] }) => {
+          setDuplicateSelections(prev => ({ ...prev, [String(d.order)]: d.chapters[0]?.id || '' }))
+        })
+      } else {
+        toast({ title: data.error || '检测失败', variant: 'destructive' })
+      }
+    } catch (e) {
+      toast({ title: '检测失败', variant: 'destructive' })
+    } finally {
+      setChapterCheckLoading(false)
+    }
+  }
+
+  const handleDeleteDuplicates = async () => {
+    if (!chapterCheckResult?.duplicates || !chapterCheckNovel) return
+    const toDelete: string[] = []
+    for (const dup of chapterCheckResult.duplicates) {
+      const keepId = duplicateSelections[String(dup.order)] || dup.chapters[0]?.id
+      dup.chapters.filter(c => c.id !== keepId).forEach(c => toDelete.push(c.id))
+    }
+    if (toDelete.length === 0) {
+      toast({ title: '请选择要保留的章节' })
+      return
+    }
+    try {
+      for (const id of toDelete) {
+        await fetch(`/api/chapters?id=${id}`, { method: 'DELETE' })
+      }
+      toast({ title: `已删除 ${toDelete.length} 个重复章节` })
+      const novelsRes = await fetch('/api/novels')
+      const novelsData = await novelsRes.json()
+      if (novelsData.success) {
+        setNovels(novelsData.novels)
+        if (chapterCheckNovel?.id === currentNovel?.id) {
+          const updated = novelsData.novels.find((n: Novel) => n.id === chapterCheckNovel.id)
+          if (updated) setCurrentNovel(updated)
+        }
+      }
+      setChapterCheckResult(prev => prev ? { ...prev, duplicates: [] } : null)
+    } catch {
+      toast({ title: '删除失败', variant: 'destructive' })
+    }
+  }
+
+  const handleFillGaps = async () => {
+    if (!chapterCheckResult?.gaps?.length || !chapterCheckNovel) return
+    setChapterCheckFilling(true)
+    try {
+      const res = await fetch('/api/ai/fill-gaps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          novelId: chapterCheckNovel.id,
+          orders: chapterCheckResult.gaps,
+          generateMode: smartGenSettings.generateMode
+        })
+      })
+      const data = await res.json()
+      if (data.success) {
+        toast({ title: `已补全 ${data.created?.length || 0} 章，共 ${data.totalWords || 0} 字` })
+        const novelsRes = await fetch('/api/novels')
+        const novelsData = await novelsRes.json()
+        if (novelsData.success) {
+          setNovels(novelsData.novels)
+          if (chapterCheckNovel?.id === currentNovel?.id) {
+            const updated = novelsData.novels.find((n: Novel) => n.id === chapterCheckNovel.id)
+            if (updated) setCurrentNovel(updated)
+          }
+        }
+        setChapterCheckResult(prev => prev ? { ...prev, gaps: [] } : null)
+      } else {
+        toast({ title: data.error || '补全失败', variant: 'destructive' })
+      }
+    } catch {
+      toast({ title: '补全失败', variant: 'destructive' })
+    } finally {
+      setChapterCheckFilling(false)
+    }
+  }
+
   // Chapter List Component (reusable). When hideHeaderRow, only list (desktop sidebar has 章节目录+新建 in CardHeader).
   const ChapterListComponent = ({ inSheet = false, hideHeaderRow = false }: { inSheet?: boolean; hideHeaderRow?: boolean }) => (
     <div className={inSheet ? 'py-2' : 'flex flex-col flex-1 min-h-0'}>
@@ -1831,6 +1939,101 @@ export default function NovelWriterApp() {
               </DialogContent>
             </Dialog>
 
+            {/* Chapter Check Dialog */}
+            <Dialog open={showChapterCheck} onOpenChange={(open) => {
+              setShowChapterCheck(open)
+              if (!open) {
+                setChapterCheckResult(null)
+                setChapterCheckNovel(null)
+              }
+            }}>
+              <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <SearchCheck className="w-5 h-5 text-blue-500" />
+                    章节检测
+                  </DialogTitle>
+                  <DialogDescription>
+                    检测章节重复与缺失，支持删除重复、一键补全缺失
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="flex-1 overflow-y-auto space-y-4 py-4">
+                  {chapterCheckNovel && (
+                    <Card>
+                      <CardContent className="py-3">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary">{chapterCheckNovel.genre || '未分类'}</Badge>
+                          <span className="font-semibold">{chapterCheckNovel.title}</span>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+                  {!chapterCheckResult ? (
+                    <div className="flex justify-center py-8">
+                      <Button onClick={handleChapterCheck} disabled={chapterCheckLoading}>
+                        {chapterCheckLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <SearchCheck className="w-4 h-4 mr-2" />}
+                        开始检测
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {chapterCheckResult.duplicates.length > 0 && (
+                        <div className="space-y-3">
+                          <h4 className="font-medium text-destructive">重复章节（选择保留，其余删除）</h4>
+                          {chapterCheckResult.duplicates.map((dup) => (
+                            <Card key={dup.order}>
+                              <CardContent className="py-3">
+                                <p className="text-sm text-muted-foreground mb-2">第 {dup.order + 1} 章有 {dup.chapters.length} 个重复：</p>
+                                <RadioGroup
+                                  value={duplicateSelections[String(dup.order)] || dup.chapters[0]?.id}
+                                  onValueChange={(v) => setDuplicateSelections(prev => ({ ...prev, [String(dup.order)]: v }))}
+                                  className="space-y-2"
+                                >
+                                  {dup.chapters.map((ch) => (
+                                    <div key={ch.id} className="flex items-center space-x-2">
+                                      <RadioGroupItem value={ch.id} id={`dup-${dup.order}-${ch.id}`} />
+                                      <Label htmlFor={`dup-${dup.order}-${ch.id}`} className="font-normal cursor-pointer flex-1">
+                                        {ch.title} · {ch.wordCount}字
+                                      </Label>
+                                    </div>
+                                  ))}
+                                </RadioGroup>
+                              </CardContent>
+                            </Card>
+                          ))}
+                          <Button variant="destructive" size="sm" onClick={handleDeleteDuplicates}>
+                            <Trash2 className="w-4 h-4 mr-2" />
+                            删除选中重复
+                          </Button>
+                        </div>
+                      )}
+                      {chapterCheckResult.gaps.length > 0 && (
+                        <div className="space-y-2">
+                          <h4 className="font-medium text-amber-600 dark:text-amber-400">缺失章节</h4>
+                          <p className="text-sm text-muted-foreground">
+                            第 {chapterCheckResult.gaps.map(o => o + 1).join('、')} 章缺失
+                          </p>
+                          <Button
+                            onClick={handleFillGaps}
+                            disabled={chapterCheckFilling}
+                          >
+                            {chapterCheckFilling ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
+                            一键补全
+                          </Button>
+                        </div>
+                      )}
+                      {chapterCheckResult.duplicates.length === 0 && chapterCheckResult.gaps.length === 0 && (
+                        <div className="flex items-center gap-2 p-4 bg-green-50 dark:bg-green-950/20 rounded-lg">
+                          <CheckCircle2 className="w-5 h-5 text-green-500" />
+                          <span className="text-green-700 dark:text-green-300">未发现重复或缺失</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </DialogContent>
+            </Dialog>
+
             {novels.length === 0 ? (
               <Card className="border-dashed">
                 <CardContent className="flex flex-col items-center justify-center py-12 md:py-16">
@@ -1884,6 +2087,16 @@ export default function NovelWriterApp() {
                             >
                               <Wand2 className="w-4 h-4 mr-2 text-amber-500" />
                               智能生成章节
+                            </DropdownMenuItem>
+                            <DropdownMenuItem 
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setChapterCheckNovel(novel)
+                                setShowChapterCheck(true)
+                              }}
+                            >
+                              <SearchCheck className="w-4 h-4 mr-2 text-blue-500" />
+                              章节检测
                             </DropdownMenuItem>
                             <DropdownMenuItem 
                               onClick={(e) => {
@@ -2436,16 +2649,28 @@ export default function NovelWriterApp() {
                           创建章节
                         </Button>
                         {currentNovel?.description && currentNovel.description.length >= 20 && (
-                          <Button 
-                            variant="outline"
-                            onClick={() => {
-                              setSmartGenNovel(currentNovel)
-                              setShowSmartGenerate(true)
-                            }}
-                          >
-                            <Wand2 className="w-4 h-4 mr-2" />
-                            智能生成
-                          </Button>
+                          <>
+                            <Button 
+                              variant="outline"
+                              onClick={() => {
+                                setSmartGenNovel(currentNovel)
+                                setShowSmartGenerate(true)
+                              }}
+                            >
+                              <Wand2 className="w-4 h-4 mr-2" />
+                              智能生成
+                            </Button>
+                            <Button 
+                              variant="outline"
+                              onClick={() => {
+                                setChapterCheckNovel(currentNovel)
+                                setShowChapterCheck(true)
+                              }}
+                            >
+                              <SearchCheck className="w-4 h-4 mr-2" />
+                              章节检测
+                            </Button>
+                          </>
                         )}
                       </div>
                     </CardContent>
