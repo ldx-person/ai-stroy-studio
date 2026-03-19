@@ -333,6 +333,9 @@ export async function listOSSNovels(): Promise<OSSNovelMeta[]> {
     const novels: OSSNovelMeta[] = []
     let marker: string | undefined
     
+    // 第二步：并发读取所有 novel.json 文件（最多 10 个并发）
+    const CONCURRENCY = 10
+    
     do {
       const result = await client.list({
         prefix: `${NOVEL_PREFIX}/`,
@@ -343,28 +346,26 @@ export async function listOSSNovels(): Promise<OSSNovelMeta[]> {
       
       const prefixes: string[] = result.prefixes || []
     
-    // 第二步：并发读取所有 novel.json 文件（最多 10 个并发）
-    const CONCURRENCY = 10
-    for (let i = 0; i < prefixes.length; i += CONCURRENCY) {
-      const batch = prefixes.slice(i, i + CONCURRENCY)
-      const batchResults = await Promise.allSettled(
-        batch.map(async (prefix) => {
-          const novelJsonKey = `${prefix}novel.json`
-          const metaResult = await client.get(novelJsonKey)
-          const meta: OSSNovelMeta = JSON.parse(metaResult.content.toString('utf-8'))
-          return meta
-        })
-      )
-      for (const res of batchResults) {
-        if (res.status === 'fulfilled') {
-          novels.push(res.value)
-        } else {
-          console.error('读取小说元数据失败:', res.reason)
+      for (let i = 0; i < prefixes.length; i += CONCURRENCY) {
+        const batch = prefixes.slice(i, i + CONCURRENCY)
+        const batchResults = await Promise.allSettled(
+          batch.map(async (prefix) => {
+            const novelJsonKey = `${prefix}novel.json`
+            const metaResult = await client.get(novelJsonKey)
+            const meta: OSSNovelMeta = JSON.parse(metaResult.content.toString('utf-8'))
+            return meta
+          })
+        )
+        for (const res of batchResults) {
+          if (res.status === 'fulfilled') {
+            novels.push(res.value)
+          } else {
+            console.error('读取小说元数据失败:', res.reason)
+          }
         }
       }
-    }
     
-    marker = result.nextMarker
+      marker = result.nextMarker
     } while (marker)
     
     // 按更新时间排序
