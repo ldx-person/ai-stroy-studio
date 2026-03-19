@@ -41,16 +41,17 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/package.json ./package.json
 
-# Copy full node_modules (needed for prisma CLI via bunx)
-COPY --from=builder /app/node_modules ./node_modules
-
 # Set the correct permission for prerender cache
 RUN mkdir -p .next
 RUN chown nextjs:nodejs .next
 
-# Copy standalone build
+# Copy standalone build first
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# Override with full node_modules to ensure ali-oss and prisma work correctly
+# (standalone build may have incomplete versions of native/complex packages)
+COPY --from=builder /app/node_modules ./node_modules
 
 # Create db directory with proper permissions
 RUN mkdir -p /app/db && chown -R nextjs:nodejs /app/db && chmod 755 /app/db
