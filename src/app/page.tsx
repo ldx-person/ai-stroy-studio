@@ -51,7 +51,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
-import { TTSPlayer, ChapterList, NovelCard } from '@/components/novel'
+import { TTSPlayer, ChapterList, NovelCard, StoryBibleEditor } from '@/components/novel'
 
 // Types
 interface Novel {
@@ -2299,6 +2299,10 @@ export default function NovelWriterApp() {
                         <BookOpen className="w-3 h-3 md:w-4 md:h-4" />
                         大纲
                       </TabsTrigger>
+                      <TabsTrigger value="bible" className="gap-1 md:gap-2 text-xs md:text-sm">
+                        <BookMarked className="w-3 h-3 md:w-4 md:h-4" />
+                        档案
+                      </TabsTrigger>
                     </TabsList>
                     
                     <TabsContent value="write" className="flex-1 mt-3 md:mt-4">
@@ -2607,6 +2611,14 @@ export default function NovelWriterApp() {
                           </div>
                         )}
                       </div>
+                    </TabsContent>
+
+                    <TabsContent value="bible" className="flex-1 mt-3 md:mt-4 overflow-y-auto">
+                      <StoryBibleEditor
+                        novelId={currentNovel.id}
+                        novelTitle={currentNovel.title}
+                        novelDescription={currentNovel.description}
+                      />
                     </TabsContent>
                   </Tabs>
 

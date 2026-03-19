@@ -6,7 +6,7 @@ import { getStoryBibleFromOSS, isOSSAvailable } from '@/lib/oss'
 const actionSchema = z.object({
   novelId: z.string().optional(),
   chapterId: z.string().optional(),
-  action: z.enum(['rewrite', 'continue', 'title', 'opening', 'describe']).default('rewrite'),
+  action: z.enum(['rewrite', 'continue', 'title', 'opening', 'describe', 'story-bible']).default('rewrite'),
   input: z.object({
     scope: z.enum(['selection', 'cursor', 'chapter']).default('selection'),
     text: z.string().min(1, '内容不能为空').max(12000, '内容最多12000个字符'),
@@ -21,6 +21,7 @@ const actionSchema = z.object({
     })
     .default({ variants: 1 }),
 })
+
 
 function buildRewritePrompt(mode: 'polish' | 'shorten' | 'expand', scope: 'selection' | 'chapter') {
   const scopeText = scope === 'chapter' ? '章节正文' : '选中文本'
@@ -221,6 +222,24 @@ export async function POST(request: NextRequest) {
       for (let i = 0; i < variants; i++) {
         await run(makeMessages(), i === 0 ? 0.7 : 0.9)
       }
+    } else if (action === 'story-bible') {
+      const system = `你是一位专业的小说设定助手，擅长创建作品档案（Story Bible）。
+请根据用户提供的小说标题和简介，生成完整的作品档案，包括：
+1. characters: 角色卡数组，每个角色包含 {id, name, role(protagonist/supporting/antagonist/other), personality, motivation, speech, relationships, appearance, background}
+2. worldRules: 世界观设定数组，每个包含 {id, name, description, constraints}
+3. timeline: 时间线数组，每个包含 {id, chapter, event, impact}
+4. styleGuide: 文风规则 {pov, tense, tone, taboos[]}
+
+要求：
+- 只输出纯 JSON，不要 markdown 代码块标记
+- 角色要有细节，性格、动机、说话风格都要具体
+- 世界观要符合小说类型
+- 时间线按章节顺序排列`
+      const makeMessages = (): ChatMessage[] => [
+        { role: 'system', content: system },
+        { role: 'user', content: `请根据以下信息生成作品档案（JSON格式）：\n\n${input.text}` },
+      ]
+      await run(makeMessages(), 0.7)
     }
 
     if (candidates.length === 0) {

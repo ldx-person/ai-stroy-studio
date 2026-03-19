@@ -18,8 +18,8 @@ if (fs.existsSync(envPath)) {
 }
 
 const apiKey = process.env.ZAI_API_KEY || process.env.ALIYUN_AI_API_KEY || process.env.ZHIPU_AI_API_KEY
-const baseUrl = (process.env.ZAI_BASE_URL || process.env.ALIYUN_AI_BASE_URL || 'https://api.z.ai/api/paas/v4').replace(/\/$/, '')
-const model = process.env.ZAI_MODEL || process.env.ALIYUN_AI_MODEL || 'glm-5-turbo'
+const baseUrl = (process.env.ZAI_BASE_URL || process.env.ALIYUN_AI_BASE_URL || 'https://api.z.ai/api/coding/paas/v4').replace(/\/$/, '')
+const model = process.env.ZAI_MODEL || process.env.ALIYUN_AI_MODEL || 'glm-5'
 
 async function test() {
   if (!apiKey) {
