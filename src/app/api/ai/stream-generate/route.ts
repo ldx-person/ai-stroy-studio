@@ -11,13 +11,14 @@ const requestSchema = z.object({
   description: z.string().min(20),
   genre: z.string().optional().nullable(),
   totalWords: z.number().int().min(1000).max(1000000),
-  chapterCount: z.number().int().min(3).max(500)
+  chapterCount: z.number().int().min(3).max(500),
+  generateMode: z.enum(['full', 'opening']).optional().default('full')
 })
 
 // 配置
 const BATCH_SIZE = 3
-const WORDS_PER_CHAPTER_MIN = 1500
-const WORDS_PER_CHAPTER_MAX = 8000
+// 每章只生成开头（约100字），不生成整章全文
+const OPENING_WORDS_PER_CHAPTER = 100
 
 const PHASE_RATIOS = {
   beginning: 0.15,
@@ -168,8 +169,8 @@ ${phaseInfo}${contextText}${charactersText}
   }))
 }
 
-// 生成章节内容
-async function generateChapterContent(
+// 生成章节开头（约100字）
+async function generateChapterOpening(
   title: string,
   genre: string | null,
   plan: ChapterPlan,
@@ -187,13 +188,14 @@ async function generateChapterContent(
     ? `\n前章结尾衔接：${previousContent.slice(-200)}`
     : ''
   
-  const systemPrompt = `你是专业小说作家。根据大纲创作内容，要求：
-1. 内容丰富生动，有细节和情感
-2. 对话自然，符合角色性格
-3. 场景有画面感
-4. 结尾有悬念铺垫下章
-5. 只输出正文，无标题说明
-6. 字数${plan.estimatedWords - 200}-${plan.estimatedWords + 500}字`
+  const systemPrompt = `你是一位专业的小说作家，擅长为章节写出吸引人的开头。
+请根据章节大纲创作【本章的开头部分】，要求：
+1. 只写开头的第一个自然段或前几句，不要写完整章节
+2. 内容要有画面感和情绪张力，抓住读者
+3. 可以点出本章的矛盾或悬念，但不要完全展开
+4. 语言风格与前文保持一致
+5. 只输出小说正文内容，不要章节标题和其他说明
+6. 字数控制在约${OPENING_WORDS_PER_CHAPTER}字左右（可以略多或略少）`
 
   const userPrompt = `小说：${title}
 ${genreText}${contextText}${charactersText}${previousText}
@@ -201,12 +203,64 @@ ${genreText}${contextText}${charactersText}${previousText}
 章节：${plan.title}
 大纲：${plan.outline}
 
-创作内容：`
+请创作本章开头：`
 
   return await callAliyunAIWithRetry([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userPrompt }
   ], 3, 3000)
+}
+
+// 生成整章正文（约800-1500字）
+async function generateFullChapter(
+  title: string,
+  genre: string | null,
+  plan: ChapterPlan,
+  structure: { beginning: string; middle: string; ending: string },
+  context: StoryContext,
+  previousContent: string
+): Promise<string> {
+  const genreText = genre ? `这是一部${genre}类型的小说。` : ''
+  const contextText = context.recentSummaries.length > 0
+    ? `之前剧情摘要：${context.recentSummaries.slice(-3).join(' -> ')}`
+    : ''
+  const charactersText = context.characters.length > 0
+    ? `已出现角色：${context.characters.join('、')}`
+    : ''
+  const previousText = previousContent
+    ? `前一章结尾：\n${previousContent.slice(-500)}`
+    : ''
+
+  const storyContext = `小说：${title}
+${genreText}
+故事结构：开头 ${structure.beginning} | 经过 ${structure.middle} | 结尾 ${structure.ending}
+${contextText}
+${charactersText}
+${previousText}`.trim()
+
+  const systemPrompt = `你是一位专业的小说作家，擅长创作引人入胜的故事内容。
+请根据章节大纲创作小说内容，要求：
+1. 内容要丰富生动，有细节描写
+2. 人物对话要自然，符合角色性格
+3. 情节发展要符合大纲，但可以适当展开
+4. 场景描写要有画面感
+5. 文末要有适当的悬念或过渡，为下一章铺垫
+6. 只输出小说正文内容，不要章节标题和其他说明
+7. 字数控制在800-1500字左右`
+
+  const userPrompt = `故事背景：
+${storyContext}
+
+本章信息：
+章节标题：${plan.title}
+章节大纲：${plan.outline}
+
+请创作本章内容：`
+
+  return await callAliyunAIWithRetry([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt }
+  ], 3, 4000)
 }
 
 // 生成摘要
@@ -232,10 +286,10 @@ export async function POST(request: NextRequest) {
     })
   }
   
-  const { novelId, title, description, genre, totalWords, chapterCount } = validation.data
+  const { novelId, title, description, genre, totalWords, chapterCount, generateMode } = validation.data
   
-  let wordsPerChapter = Math.floor(totalWords / chapterCount)
-  wordsPerChapter = Math.max(WORDS_PER_CHAPTER_MIN, Math.min(WORDS_PER_CHAPTER_MAX, wordsPerChapter))
+  // 计算每章目标字数（用于大纲生成时的上下文参考）
+  const wordsPerChapter = Math.floor(totalWords / chapterCount)
   
   const stream = new ReadableStream({
     async start(controller) {
@@ -243,6 +297,33 @@ export async function POST(request: NextRequest) {
       let previousContent = ''
       let totalGeneratedWords = 0
       const generatedChapters: Array<{ id: string; title: string; wordCount: number }> = []
+      
+      // 读取已有章节，用于跳过已存在的内容
+      const existingChapters = await db.chapter.findMany({
+        where: { novelId },
+        orderBy: { order: 'asc' }
+      })
+      const existingOrders = new Set(existingChapters.map(ch => ch.order))
+      
+      // 如果所有章节都已存在，直接返回
+      if (existingOrders.size >= chapterCount) {
+        sendEvent(controller, 'complete', {
+          message: `所有章节已存在，跳过生成。共 ${existingChapters.length} 章`,
+          totalChapters: existingChapters.length,
+          totalWords: existingChapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0),
+          skipped: true,
+          chapters: existingChapters.map(ch => ({ id: ch.id, title: ch.title, wordCount: ch.wordCount }))
+        })
+        controller.close()
+        return
+      }
+      
+      // 发送跳过信息
+      sendEvent(controller, 'existing', {
+        message: `检测到已有 ${existingOrders.size} 章，将跳过这些章节`,
+        existingCount: existingOrders.size,
+        toGenerateCount: chapterCount - existingOrders.size
+      })
       
       try {
         sendEvent(controller, 'start', { 
@@ -280,13 +361,25 @@ export async function POST(request: NextRequest) {
           })
           
           for (const plan of plans) {
+            // 跳过已存在的章节
+            if (existingOrders.has(plan.index)) {
+              sendEvent(controller, 'chapter_skip', {
+                index: plan.index,
+                title: plan.title,
+                message: `第 ${plan.index + 1} 章已存在，跳过`
+              })
+              continue
+            }
+            
             sendEvent(controller, 'chapter_start', {
               index: plan.index,
               title: plan.title,
-              message: `正在生成第 ${plan.index + 1} 章: ${plan.title}...`
+              message: `正在生成第 ${plan.index + 1} 章${generateMode === 'full' ? '正文' : '开头'}: ${plan.title}...`
             })
             
-            const content = await generateChapterContent(title, genre, plan, context, previousContent)
+            const content = generateMode === 'full'
+              ? await generateFullChapter(title, genre, plan, structure, context, previousContent)
+              : await generateChapterOpening(title, genre, plan, context, previousContent)
             const summary = await generateSummary(content)
             
             context.recentSummaries.push(summary)
@@ -330,8 +423,10 @@ export async function POST(request: NextRequest) {
         await updateNovelMeta(novelId, { wordCount: totalGeneratedWords })
         
         sendEvent(controller, 'complete', {
-          message: `生成完成！共 ${chapterCount} 章，${totalGeneratedWords} 字`,
+          message: `生成完成！新生成 ${generatedChapters.length} 章，共 ${totalGeneratedWords} 字`,
           totalChapters: chapterCount,
+          generatedCount: generatedChapters.length,
+          skippedCount: existingOrders.size,
           totalWords: totalGeneratedWords,
           chapters: generatedChapters
         })

@@ -47,6 +47,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { TTSPlayer, ChapterList, NovelCard } from '@/components/novel'
@@ -164,7 +165,11 @@ export default function NovelWriterApp() {
   // Smart generation states
   const [showSmartGenerate, setShowSmartGenerate] = useState(false)
   const [smartGenNovel, setSmartGenNovel] = useState<Novel | null>(null)
-  const [smartGenSettings, setSmartGenSettings] = useState({ totalWords: 100000, chapterCount: 20 })
+  const [smartGenSettings, setSmartGenSettings] = useState({ 
+    totalWords: 100000, 
+    chapterCount: 20,
+    generateMode: 'full' as 'full' | 'opening'
+  })
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationProgress, setGenerationProgress] = useState({
     phase: '',
@@ -550,8 +555,17 @@ export default function NovelWriterApp() {
         body: JSON.stringify({ action: 'title', input: { scope: 'chapter', text: editingContent }, options: { variants: 1 } })
       })
       const data = await res.json()
-      const title = data?.candidates?.[0]?.text?.trim()
+      let title = data?.candidates?.[0]?.text?.trim()
       if (data.success && currentChapter && title) {
+        // 保留原有的章节号前缀（如"第X章"）
+        const originalTitle = currentChapter.title
+        const chapterPrefixMatch = originalTitle.match(/^(第[一二三四五六七八九十百千\d]+章\s*)/)
+        if (chapterPrefixMatch) {
+          // 移除新标题中可能已有的章节号前缀
+          const cleanTitle = title.replace(/^(第[一二三四五六七八九十百千\d]+章\s*)/, '')
+          title = chapterPrefixMatch[1] + cleanTitle
+        }
+        
         const res2 = await fetch('/api/chapters', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -1152,13 +1166,14 @@ export default function NovelWriterApp() {
       const response = await fetch('/api/ai/stream-generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+          body: JSON.stringify({
           novelId: smartGenNovel.id,
           title: smartGenNovel.title,
           description: smartGenNovel.description,
           genre: smartGenNovel.genre,
           totalWords: smartGenSettings.totalWords,
-          chapterCount: smartGenSettings.chapterCount
+          chapterCount: smartGenSettings.chapterCount,
+          generateMode: smartGenSettings.generateMode
         })
       })
       
@@ -1239,7 +1254,23 @@ export default function NovelWriterApp() {
                     message: data.message
                   }))
                   break
-                  
+
+                case 'existing':
+                  toast({
+                    title: data.message,
+                    description: `将生成 ${data.toGenerateCount} 个新章节`
+                  })
+                  break
+
+                case 'chapter_skip':
+                  setGenerationProgress(prev => ({
+                    ...prev,
+                    current: data.index + 1,
+                    currentTitle: data.title,
+                    message: data.message
+                  }))
+                  break
+
                 case 'chapter_done':
                   setGenerationProgress(prev => ({
                     ...prev,
@@ -1731,6 +1762,27 @@ export default function NovelWriterApp() {
                           </Select>
                         </div>
                       </div>
+
+                      <div className="space-y-2">
+                        <Label>生成模式</Label>
+                        <RadioGroup
+                          value={smartGenSettings.generateMode}
+                          onValueChange={(v) => setSmartGenSettings({ ...smartGenSettings, generateMode: v as 'full' | 'opening' })}
+                          className="flex gap-4"
+                        >
+                          <div className="flex items-center space-x-2">
+                            <RadioGroupItem value="full" id="mode-full" />
+                            <Label htmlFor="mode-full" className="font-normal cursor-pointer">整文生成</Label>
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <RadioGroupItem value="opening" id="mode-opening" />
+                            <Label htmlFor="mode-opening" className="font-normal cursor-pointer">生成开头</Label>
+                          </div>
+                        </RadioGroup>
+                        <p className="text-xs text-muted-foreground">
+                          {smartGenSettings.generateMode === 'full' ? '每章生成完整正文（约800-1500字）' : '每章仅生成约100字开头，便于续写或扩写'}
+                        </p>
+                      </div>
                       
                       {/* Tips */}
                       <div className="flex items-start gap-2 p-3 bg-amber-50 dark:bg-amber-950/20 rounded-lg text-sm">
@@ -1738,7 +1790,7 @@ export default function NovelWriterApp() {
                         <div className="text-amber-700 dark:text-amber-300">
                           <p className="font-medium">生成说明</p>
                           <ul className="mt-1 space-y-1 text-xs list-disc list-inside">
-                            <li>每章约 {Math.floor(smartGenSettings.totalWords / smartGenSettings.chapterCount).toLocaleString()} 字</li>
+                            <li>{smartGenSettings.generateMode === 'full' ? '每章约 800-1500 字完整正文' : '每章约 100 字开头'}</li>
                             <li>AI会自动维护上下文连贯性</li>
                             <li>大批量生成预计需要较长时间，请耐心等待</li>
                           </ul>
@@ -1750,7 +1802,7 @@ export default function NovelWriterApp() {
                         <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-950/20 rounded-lg text-sm">
                           <AlertCircle className="w-4 h-4 text-blue-500" />
                           <span className="text-blue-700 dark:text-blue-300">
-                            预计生成时间：约 {Math.ceil(smartGenSettings.chapterCount / 3 * 0.5)} 分钟
+                            预计生成时间：约 {Math.ceil(smartGenSettings.chapterCount / 3 * (smartGenSettings.generateMode === 'full' ? 1.5 : 0.5))} 分钟
                           </span>
                         </div>
                       )}
