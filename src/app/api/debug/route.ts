@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import OSS from 'ali-oss'
 
 export async function GET() {
   const config = {
@@ -19,9 +20,37 @@ export async function GET() {
     nodeEnv: process.env.NODE_ENV
   }
   
+  // 直接测试 OSS list 返回值
+  let ossListResult: Record<string, unknown> = {}
+  try {
+    const client = new OSS({
+      region: process.env.OSS_REGION || 'oss-cn-beijing',
+      accessKeyId: process.env.OSS_ACCESS_KEY_ID || '',
+      accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || '',
+      bucket: process.env.OSS_BUCKET || 'ai-story-stroe',
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (client as any).list({
+      prefix: 'novels/',
+      delimiter: '/',
+      'max-keys': 1000,
+    })
+    ossListResult = {
+      resultKeys: Object.keys(result),
+      prefixes: result.prefixes,
+      prefixesType: typeof result.prefixes,
+      prefixesIsArray: Array.isArray(result.prefixes),
+      objectsCount: result.objects?.length ?? 0,
+      nextMarker: result.nextMarker,
+    }
+  } catch (err) {
+    ossListResult = { error: err instanceof Error ? err.message : String(err) }
+  }
+
   return NextResponse.json({
     success: true,
     config,
+    ossListResult,
     timestamp: new Date().toISOString()
   })
 }
