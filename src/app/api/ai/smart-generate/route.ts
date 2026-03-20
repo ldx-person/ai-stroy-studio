@@ -325,6 +325,7 @@ export async function POST(request: NextRequest) {
     }
     
     const { novelId, title, description, genre, totalWords, chapterCount } = validation.data
+    const genreNormalized: string | null = genre ?? null
     
     // 计算每章字数（这里只是用来控制大纲粒度，实际内容只生成开头）
     const wordsPerChapter = Math.max(
@@ -361,7 +362,7 @@ export async function POST(request: NextRequest) {
     
     // Step 1: 生成故事结构
     console.log('生成故事结构...')
-    const structure = await generateStoryStructure(title, description, genre, totalWords, chapterCount)
+    const structure = await generateStoryStructure(title, description, genreNormalized, totalWords, chapterCount)
     
     // Step 2: 分批生成章节
     const startIndex = existingCount
@@ -390,7 +391,7 @@ export async function POST(request: NextRequest) {
       
       // 生成这批章节的大纲
       const chapterPlans = await generateBatchOutlines(
-        title, description, genre, structure,
+        title, description, genreNormalized, structure,
         batchStartIndex, batchSize, chapterCount, wordsPerChapter, context
       )
       
@@ -400,7 +401,7 @@ export async function POST(request: NextRequest) {
         
         // 生成章节内容
         const content = await generateChapterContent(
-          title, genre, plan, context, previousContent
+          title, genreNormalized, plan, context, previousContent
         )
         
         // 生成章节摘要

@@ -1214,7 +1214,7 @@ export default function NovelWriterApp() {
           if (!line.trim()) continue
           
           // 解析SSE事件
-          const eventMatch = line.match(/^event:\s*(\w+)\ndata:\s*(.+)$/s)
+          const eventMatch = line.match(/^event:\s*(\w+)\ndata:\s*([\s\S]+)$/)
           if (eventMatch) {
             const [, event, dataStr] = eventMatch
             try {

@@ -287,6 +287,7 @@ export async function POST(request: NextRequest) {
   }
   
   const { novelId, title, description, genre, totalWords, chapterCount, generateMode } = validation.data
+  const genreNormalized: string | null = genre ?? null
   
   // 计算每章目标字数（用于大纲生成时的上下文参考）
   const wordsPerChapter = Math.floor(totalWords / chapterCount)
@@ -331,7 +332,7 @@ export async function POST(request: NextRequest) {
           totalChapters: chapterCount 
         })
         
-        const structure = await generateStoryStructure(title, description, genre, totalWords, chapterCount)
+        const structure = await generateStoryStructure(title, description, genreNormalized, totalWords, chapterCount)
         sendEvent(controller, 'structure', { 
           message: '故事结构生成完成',
           beginning: structure.beginning,
@@ -352,7 +353,7 @@ export async function POST(request: NextRequest) {
           })
           
           const plans = await generateBatchOutlines(
-            title, genre, structure, startIndex, batchSize, chapterCount, wordsPerChapter, context
+            title, genreNormalized, structure, startIndex, batchSize, chapterCount, wordsPerChapter, context
           )
           
           sendEvent(controller, 'outlines', {
@@ -378,8 +379,8 @@ export async function POST(request: NextRequest) {
             })
             
             const content = generateMode === 'full'
-              ? await generateFullChapter(title, genre, plan, structure, context, previousContent)
-              : await generateChapterOpening(title, genre, plan, context, previousContent)
+              ? await generateFullChapter(title, genreNormalized, plan, structure, context, previousContent)
+              : await generateChapterOpening(title, genreNormalized, plan, context, previousContent)
             const summary = await generateSummary(content)
             
             context.recentSummaries.push(summary)
@@ -419,15 +420,17 @@ export async function POST(request: NextRequest) {
           }
         }
         
-        await db.novel.update({ where: { id: novelId }, data: { wordCount: totalGeneratedWords } })
-        await updateNovelMeta(novelId, { wordCount: totalGeneratedWords })
+        const existingWordSum = existingChapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0)
+        const novelWordCount = existingWordSum + totalGeneratedWords
+        await db.novel.update({ where: { id: novelId }, data: { wordCount: novelWordCount } })
+        await updateNovelMeta(novelId, { wordCount: novelWordCount })
         
         sendEvent(controller, 'complete', {
           message: `生成完成！新生成 ${generatedChapters.length} 章，共 ${totalGeneratedWords} 字`,
           totalChapters: chapterCount,
           generatedCount: generatedChapters.length,
           skippedCount: existingOrders.size,
-          totalWords: totalGeneratedWords,
+          totalWords: novelWordCount,
           chapters: generatedChapters
         })
         

@@ -8,7 +8,7 @@ const createSchema = z.object({
   content: z.string(),
   wordCount: z.number().int(),
   source: z.string().min(1), // 'ai_rewrite', 'ai_continue', 'ai_describe', 'manual', etc.
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 })
 
 export async function POST(request: NextRequest) {
