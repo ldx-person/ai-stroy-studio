@@ -50,6 +50,46 @@ export async function GET() {
     ossGetResult = { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack?.slice(0, 300) : '' }
   }
 
+  // 模拟 listOSSNovels 的批处理逻辑，找出具体失败点
+  let ossSimulateResult: Record<string, unknown> = {}
+  try {
+    const client = new OSS({
+      region: process.env.OSS_REGION || 'oss-cn-beijing',
+      accessKeyId: process.env.OSS_ACCESS_KEY_ID || '',
+      accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || '',
+      bucket: process.env.OSS_BUCKET || 'ai-story-stroe',
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const listResult = await (client as any).list({
+      prefix: 'novels/',
+      delimiter: '/',
+      'max-keys': 1000,
+    })
+    const prefixes: string[] = listResult.prefixes || []
+    const batchResults = await Promise.allSettled(
+      prefixes.map(async (prefix: string) => {
+        const novelJsonKey = `${prefix}novel.json`
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const metaResult = await (client as any).get(novelJsonKey)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const meta: Record<string, unknown> = JSON.parse(metaResult.content.toString('utf-8'))
+        return meta
+      })
+    )
+    ossSimulateResult = {
+      prefixesCount: prefixes.length,
+      prefixes,
+      batchResults: batchResults.map((r, i) => ({
+        index: i,
+        status: r.status,
+        value: r.status === 'fulfilled' ? r.value : undefined,
+        reason: r.status === 'rejected' ? String(r.reason) : undefined,
+      }))
+    }
+  } catch (err) {
+    ossSimulateResult = { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack?.slice(0, 500) : '' }
+  }
+
   // 直接测试 OSS list 返回值
   let ossListResult: Record<string, unknown> = {}
   try {
@@ -82,6 +122,7 @@ export async function GET() {
     config,
     ossNovelsResult,
     ossGetResult,
+    ossSimulateResult,
     ossListResult,
     timestamp: new Date().toISOString()
   })
