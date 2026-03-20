@@ -32,3 +32,6 @@ public/fonts/*.ttf
 public/fonts/*.otf
 public/fonts/*.woff
 public/fonts/*.woff2
+.env
+tsconfig.tsbuildinfo
+dev.log

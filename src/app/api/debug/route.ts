@@ -30,6 +30,26 @@ export async function GET() {
     ossNovelsResult = { error: err instanceof Error ? err.message : String(err) }
   }
 
+  // 测试 client.get 是否正常
+  let ossGetResult: Record<string, unknown> = {}
+  try {
+    const client = new OSS({
+      region: process.env.OSS_REGION || 'oss-cn-beijing',
+      accessKeyId: process.env.OSS_ACCESS_KEY_ID || '',
+      accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || '',
+      bucket: process.env.OSS_BUCKET || 'ai-story-stroe',
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const getResult = await (client as any).get('novels/cmmnc4vuf00mmnap1e4bqrpjd/novel.json')
+    ossGetResult = {
+      contentType: typeof getResult.content,
+      contentLength: getResult.content?.length,
+      contentPreview: getResult.content?.toString('utf-8')?.slice(0, 200)
+    }
+  } catch (err) {
+    ossGetResult = { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack?.slice(0, 300) : '' }
+  }
+
   // 直接测试 OSS list 返回值
   let ossListResult: Record<string, unknown> = {}
   try {
@@ -61,6 +81,7 @@ export async function GET() {
     success: true,
     config,
     ossNovelsResult,
+    ossGetResult,
     ossListResult,
     timestamp: new Date().toISOString()
   })
