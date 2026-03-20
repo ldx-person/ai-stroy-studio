@@ -20,6 +20,16 @@ export async function GET() {
     nodeEnv: process.env.NODE_ENV
   }
   
+  // 直接测试 listOSSNovels 函数
+  let ossNovelsResult: Record<string, unknown> = {}
+  try {
+    const { listOSSNovels } = await import('@/lib/oss')
+    const novels = await listOSSNovels()
+    ossNovelsResult = { count: novels.length, novels: novels.map(n => ({ id: n.id, title: n.title })) }
+  } catch (err) {
+    ossNovelsResult = { error: err instanceof Error ? err.message : String(err) }
+  }
+
   // 直接测试 OSS list 返回值
   let ossListResult: Record<string, unknown> = {}
   try {
@@ -50,6 +60,7 @@ export async function GET() {
   return NextResponse.json({
     success: true,
     config,
+    ossNovelsResult,
     ossListResult,
     timestamp: new Date().toISOString()
   })
