@@ -344,6 +344,11 @@ export async function listOSSNovels(): Promise<OSSNovelMeta[]> {
         marker
       })
       
+      console.log('[OSS DEBUG] list result keys:', Object.keys(result))
+      console.log('[OSS DEBUG] result.prefixes:', JSON.stringify(result.prefixes))
+      console.log('[OSS DEBUG] result.objects count:', result.objects?.length)
+      console.log('[OSS DEBUG] result.nextMarker:', result.nextMarker)
+      
       const prefixes: string[] = result.prefixes || []
     
       for (let i = 0; i < prefixes.length; i += CONCURRENCY) {
