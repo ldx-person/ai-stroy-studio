@@ -39,7 +39,8 @@ import {
   Wand2,
   CheckCircle2,
   AlertCircle,
-  SearchCheck
+  SearchCheck,
+  Download
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -51,7 +52,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
-import { TTSPlayer, ChapterList, NovelCard, StoryBibleEditor } from '@/components/novel'
+import { TTSPlayer, ChapterList, NovelCard, StoryBibleEditor, ExportDialog } from '@/components/novel'
 
 // Types
 interface Novel {
@@ -191,6 +192,10 @@ export default function NovelWriterApp() {
     gaps: number[]
     range: { start: number; end: number }
   } | null>(null)
+
+  // Export states
+  const [showExportDialog, setShowExportDialog] = useState(false)
+  const [exportNovel, setExportNovel] = useState<Novel | null>(null)
   const [chapterCheckLoading, setChapterCheckLoading] = useState(false)
   const [chapterCheckFilling, setChapterCheckFilling] = useState(false)
   const [duplicateSelections, setDuplicateSelections] = useState<Record<string, string>>({}) // order -> id to keep
@@ -1565,8 +1570,8 @@ export default function NovelWriterApp() {
               </div>
               <div className="flex items-center gap-2">
                 {!isMobile && (
-                  <Button 
-                    variant="ghost" 
+                  <Button
+                    variant="ghost"
                     size="sm"
                     onClick={() => {
                       stopTTS()
@@ -1577,6 +1582,19 @@ export default function NovelWriterApp() {
                   >
                     <ChevronLeft className="w-4 h-4 mr-1" />
                     返回
+                  </Button>
+                )}
+                {!isMobile && currentNovel && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setExportNovel(currentNovel)
+                      setShowExportDialog(true)
+                    }}
+                  >
+                    <Download className="w-4 h-4 mr-1" />
+                    导出
                   </Button>
                 )}
               </div>
@@ -2088,7 +2106,7 @@ export default function NovelWriterApp() {
                               <Wand2 className="w-4 h-4 mr-2 text-amber-500" />
                               智能生成章节
                             </DropdownMenuItem>
-                            <DropdownMenuItem 
+                            <DropdownMenuItem
                               onClick={(e) => {
                                 e.stopPropagation()
                                 setChapterCheckNovel(novel)
@@ -2097,6 +2115,16 @@ export default function NovelWriterApp() {
                             >
                               <SearchCheck className="w-4 h-4 mr-2 text-blue-500" />
                               章节检测
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setExportNovel(novel)
+                                setShowExportDialog(true)
+                              }}
+                            >
+                              <Download className="w-4 h-4 mr-2 text-green-500" />
+                              导出小说
                             </DropdownMenuItem>
                             <DropdownMenuItem 
                               onClick={(e) => {
@@ -2836,6 +2864,15 @@ export default function NovelWriterApp() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Export Dialog */}
+      {exportNovel && (
+        <ExportDialog
+          novel={exportNovel}
+          open={showExportDialog}
+          onOpenChange={setShowExportDialog}
+        />
+      )}
 
       <Toaster />
     </div>

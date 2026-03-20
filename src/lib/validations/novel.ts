@@ -86,6 +86,17 @@ export const ttsSchema = z.object({
   speed: z.number().min(0.5).max(2.0).optional()
 })
 
+// Export schema
+export const exportSchema = z.object({
+  novelId: z.string().min(1, '小说ID不能为空'),
+  format: z.enum(['epub', 'pdf']),
+  includeCover: z.boolean().default(true),
+  includeDescription: z.boolean().default(true),
+  fontSize: z.number().int().min(10).max(24).optional().default(14),
+  lineHeight: z.number().min(1.0).max(3.0).optional().default(1.8),
+  pageMargin: z.number().int().min(20).max(80).optional().default(50),
+})
+
 // Helper to validate and return error message
 export function validateOrError<T>(schema: z.ZodSchema<T>, data: unknown): { success: true; data: T } | { success: false; error: string } {
   try {
