@@ -335,12 +335,14 @@ export async function listOSSNovels(): Promise<OSSNovelMeta[]> {
     const CONCURRENCY = 10
     
     do {
-      const result = await client.list({
+      // 注意：不传 undefined 的 marker，避免 ali-oss 将其序列化为字符串导致 OSS 返回异常结果
+      const listParams: Record<string, unknown> = {
         prefix: `${NOVEL_PREFIX}/`,
         delimiter: '/',
         'max-keys': 1000,
-        marker
-      })
+      }
+      if (marker) listParams.marker = marker
+      const result = await client.list(listParams as Parameters<typeof client.list>[0])
       
       console.log('[OSS DEBUG] list result keys:', Object.keys(result))
       console.log('[OSS DEBUG] result.prefixes:', JSON.stringify(result.prefixes))
