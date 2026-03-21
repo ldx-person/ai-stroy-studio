@@ -13,30 +13,28 @@ import OSS from 'ali-oss'
  *     └── {chapterId}.txt  # 章节内容
  */
 
-// OSS配置
-const ossConfig = {
-  region: process.env.OSS_REGION || 'oss-cn-beijing',
-  accessKeyId: process.env.OSS_ACCESS_KEY_ID || '',
-  accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || '',
-  bucket: process.env.OSS_BUCKET || 'ai-story-stroe',
+// 动态获取 OSS 配置（每次调用时读取，避免模块初始化时环境变量未注入）
+function getOSSConfig() {
+  return {
+    region: process.env.OSS_REGION || 'oss-cn-beijing',
+    accessKeyId: process.env.OSS_ACCESS_KEY_ID || '',
+    accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || '',
+    bucket: process.env.OSS_BUCKET || 'ai-story-stroe',
+  }
 }
 
 // 检查配置是否完整
 function checkOSSConfig(): boolean {
-  return !!(ossConfig.accessKeyId && ossConfig.accessKeySecret && ossConfig.bucket)
+  const cfg = getOSSConfig()
+  return !!(cfg.accessKeyId && cfg.accessKeySecret && cfg.bucket)
 }
 
-// 创建OSS客户端
-let ossClient: OSS | null = null
-
+// 创建OSS客户端（每次调用时动态创建，确保使用最新环境变量）
 function getOSSClient(): OSS {
-  if (!ossClient) {
-    if (!checkOSSConfig()) {
-      throw new Error('OSS配置不完整，请检查环境变量')
-    }
-    ossClient = new OSS(ossConfig)
+  if (!checkOSSConfig()) {
+    throw new Error('OSS配置不完整，请检查环境变量')
   }
-  return ossClient
+  return new OSS(getOSSConfig())
 }
 
 // OSS路径前缀
