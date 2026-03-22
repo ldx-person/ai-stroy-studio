@@ -5,29 +5,43 @@
  * 如果需要兼容旧配置，也会回退到阿里云/智谱的环境变量。
  */
 
-// 优先使用 Z.AI 配置，其次兼容阿里云/智谱的旧配置
-const AI_CONFIG = {
-  // Z.AI API Key 优先，其次兼容之前的环境变量
-  apiKey:
-    process.env.ZAI_API_KEY ||
-    process.env.ALIYUN_AI_API_KEY ||
-    process.env.ZHIPU_AI_API_KEY ||
-    '',
+/**
+ * 按「实际使用的 Key」选择默认 baseUrl / model，避免只配 ALIYUN_AI_API_KEY 时仍请求 Z.AI 端点导致调用失败。
+ * 优先级：ZAI_API_KEY > ALIYUN_AI_API_KEY > ZHIPU_AI_API_KEY
+ */
+function resolveAIConfig(): { apiKey: string; baseUrl: string; model: string } {
+  const zaiKey = (process.env.ZAI_API_KEY || '').trim()
+  const aliyunKey = (process.env.ALIYUN_AI_API_KEY || '').trim()
+  const zhipuKey = (process.env.ZHIPU_AI_API_KEY || '').trim()
 
-  // 默认模型切换为 GLM-5-Turbo
-  model:
-    process.env.ZAI_MODEL ||
-    process.env.ALIYUN_AI_MODEL ||
-    process.env.ZHIPU_AI_MODEL ||
-    'glm-5-turbo',
+  const stripTrailingSlash = (u: string) => u.replace(/\/+$/, '')
 
-  // 默认基地址切换为 Z.AI 的 v4 Chat Completions 兼容接口
-  // 示例：POST https://api.z.ai/api/paas/v4/chat/completions
-  baseUrl:
-    process.env.ZAI_BASE_URL ||
-    process.env.ALIYUN_AI_BASE_URL ||
-    process.env.ZHIPU_AI_BASE_URL ||
-    'https://api.z.ai/api/paas/v4',
+  if (zaiKey) {
+    return {
+      apiKey: zaiKey,
+      baseUrl: stripTrailingSlash(process.env.ZAI_BASE_URL || 'https://api.z.ai/api/paas/v4'),
+      model: process.env.ZAI_MODEL || 'glm-5-turbo',
+    }
+  }
+  if (aliyunKey) {
+    return {
+      apiKey: aliyunKey,
+      baseUrl: stripTrailingSlash(
+        process.env.ALIYUN_AI_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+      ),
+      model: process.env.ALIYUN_AI_MODEL || 'qwen-turbo',
+    }
+  }
+  if (zhipuKey) {
+    return {
+      apiKey: zhipuKey,
+      baseUrl: stripTrailingSlash(
+        process.env.ZHIPU_AI_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4'
+      ),
+      model: process.env.ZHIPU_AI_MODEL || 'glm-4-flash',
+    }
+  }
+  return { apiKey: '', baseUrl: '', model: '' }
 }
 
 // 消息类型
@@ -56,7 +70,7 @@ interface ChatCompletionResponse {
 
 // 检查配置是否完整
 function checkAIConfig(): boolean {
-  return !!AI_CONFIG.apiKey
+  return !!resolveAIConfig().apiKey
 }
 
 /**
@@ -74,19 +88,22 @@ export async function callAliyunAI(
   } = {}
 ): Promise<string> {
   if (!checkAIConfig()) {
-    throw new Error('AI大模型API配置不完整，请检查环境变量 ZAI_API_KEY（或兼容的 ALIYUN_AI_API_KEY / ZHIPU_AI_API_KEY）')
+    throw new Error(
+      'AI大模型API配置不完整，请在 .env.local 中配置其一：ZAI_API_KEY，或 ALIYUN_AI_API_KEY（阿里云百炼），或 ZHIPU_AI_API_KEY（智谱）'
+    )
   }
 
+  const cfg = resolveAIConfig()
   const { temperature = 0.7, maxTokens = 4096, topP = 0.9 } = options
 
-  const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
+  const response = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${AI_CONFIG.apiKey}`,
+      'Authorization': `Bearer ${cfg.apiKey}`,
     },
     body: JSON.stringify({
-      model: AI_CONFIG.model,
+      model: cfg.model,
       messages,
       temperature,
       max_tokens: maxTokens,
@@ -112,7 +129,33 @@ export async function callAliyunAI(
     throw new Error('AI返回结果为空')
   }
 
-  return data.choices[0].message.content
+  const text = extractAssistantText(data.choices[0]?.message)
+  if (!text.trim()) {
+    throw new Error('AI 返回的文本为空（可能是模型字段格式变更，请查看日志）')
+  }
+  return text
+}
+
+/** 兼容字符串 content 与部分厂商返回的数组片段结构 */
+function extractAssistantText(message: { content?: unknown } | undefined): string {
+  if (!message) return ''
+  const c = message.content
+  if (c == null) return ''
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    return c
+      .map((part: unknown) => {
+        if (typeof part === 'string') return part
+        if (part && typeof part === 'object' && part !== null) {
+          const o = part as Record<string, unknown>
+          if (typeof o.text === 'string') return o.text
+          if (typeof o.content === 'string') return o.content
+        }
+        return ''
+      })
+      .join('')
+  }
+  return String(c)
 }
 
 /**
@@ -169,5 +212,31 @@ export function isAliyunAIAvailable(): boolean {
  * 获取当前使用的模型名称
  */
 export function getCurrentModel(): string {
-  return AI_CONFIG.model
+  return resolveAIConfig().model
+}
+
+/** 供 /api/debug 等查看「实际生效」的服务商与端点（不含密钥） */
+export function getResolvedAIClientSummary(): {
+  provider: 'zai' | 'aliyun' | 'zhipu' | 'none'
+  baseUrl: string
+  model: string
+  hasApiKey: boolean
+} {
+  const zaiKey = (process.env.ZAI_API_KEY || '').trim()
+  const aliyunKey = (process.env.ALIYUN_AI_API_KEY || '').trim()
+  const zhipuKey = (process.env.ZHIPU_AI_API_KEY || '').trim()
+  const cfg = resolveAIConfig()
+  const provider: 'zai' | 'aliyun' | 'zhipu' | 'none' = zaiKey
+    ? 'zai'
+    : aliyunKey
+      ? 'aliyun'
+      : zhipuKey
+        ? 'zhipu'
+        : 'none'
+  return {
+    provider,
+    baseUrl: cfg.baseUrl || '—',
+    model: cfg.model || '—',
+    hasApiKey: !!cfg.apiKey,
+  }
 }

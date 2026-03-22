@@ -1,5 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// OSS 为作品唯一真相源；本库仅保留修订历史与后台任务等 OSS 不便承载的数据。
+// 迁移：若从旧版升级，请备份后执行 `npx prisma db push`（会丢弃旧 novels/chapters/characters 表）。
 
 generator client {
   provider = "prisma-client-js"
@@ -10,71 +10,35 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 小说表
-model Novel {
-  id             String     @id @default(cuid())
-  title          String
-  description    String?
-  descriptionOss String?    // 简介OSS路径
-  cover          String?    // 封面图片URL
-  coverOss       String?    // 封面图片OSS路径
-  genre          String?    // 小说类型：玄幻、都市、科幻等
-  status         String     @default("draft") // draft: 草稿, ongoing: 连载中, completed: 已完结
-  wordCount      Int        @default(0) // 总字数
-  outlineOss     String?    // 大纲OSS路径
-  chapters       Chapter[]
-  characters     Character[]
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-
-  @@map("novels")
-}
-
-// 章节表
-model Chapter {
-  id           String            @id @default(cuid())
-  novelId      String
-  novel        Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  title        String
-  content      String            @default("") // 章节内容（本地存储的简短内容）
-  contentOss   String?           // 章节内容OSS路径
-  wordCount    Int               @default(0) // 章节字数
-  order        Int               @default(0) // 章节顺序
-  isPublished  Boolean           @default(false) // 是否发布
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
-  revisions    ChapterRevision[] // 版本历史
-
-  @@index([novelId])
-  @@map("chapters")
-}
-
-// 章节版本历史表 (P2-2: 章节卡版本化)
+/// 章节内容修订历史（追加流，按 novelId + chapterId 关联 OSS 章节）
 model ChapterRevision {
-  id          String   @id @default(cuid())
-  chapterId   String
-  chapter     Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
-  content     String   // 修改前的内容
-  wordCount   Int      // 修改前的字数
-  source      String   // 修改来源: 'ai_rewrite', 'ai_continue', 'ai_describe', 'manual', etc.
-  metadata    String?  // JSON 字符串，存储额外信息（如 AI 动作参数）
-  createdAt   DateTime @default(now())
+  id        String   @id @default(cuid())
+  novelId   String
+  chapterId String
+  content   String
+  wordCount Int
+  source    String
+  metadata  String?
+  createdAt DateTime @default(now())
 
+  @@index([novelId, chapterId])
   @@index([chapterId])
   @@map("chapter_revisions")
 }
 
-// 角色表
-model Character {
-  id          String   @id @default(cuid())
-  novelId     String
-  novel       Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  name        String   // 角色名
-  description String?  // 角色描述
-  avatar      String?  // 角色头像
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+/// 异步任务状态（可选，供长耗时生成/导出等）
+model BackgroundTask {
+  id        String   @id @default(cuid())
+  type      String
+  status    String   @default("pending")
+  novelId   String?
+  payload   String?
+  result    String?
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  @@index([status])
   @@index([novelId])
-  @@map("characters")
+  @@map("background_tasks")
 }

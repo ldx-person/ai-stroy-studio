@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { z } from 'zod'
+import { getChapterContent, saveChapterContent, updateChapterInIndex, getNovelMetaFromOSS } from '@/lib/oss'
+import { recomputeNovelWordCountFromOss } from '@/lib/novel-oss-helpers'
 
-// 创建版本记录
+export const runtime = 'nodejs'
+
 const createSchema = z.object({
+  novelId: z.string().min(1),
   chapterId: z.string().min(1),
   content: z.string(),
   wordCount: z.number().int(),
-  source: z.string().min(1), // 'ai_rewrite', 'ai_continue', 'ai_describe', 'manual', etc.
+  source: z.string().min(1),
   metadata: z.record(z.string(), z.unknown()).optional(),
 })
 
@@ -15,37 +19,27 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const parsed = createSchema.safeParse(body)
-    
     if (!parsed.success) {
       return NextResponse.json(
         { success: false, error: parsed.error.issues[0]?.message || '参数验证失败' },
         { status: 400 }
       )
     }
-
-    const { chapterId, content, wordCount, source, metadata } = parsed.data
-
-    // 验证章节存在
-    const chapter = await db.chapter.findUnique({
-      where: { id: chapterId },
-      select: { id: true }
-    })
-
-    if (!chapter) {
+    const { novelId, chapterId, content, wordCount, source, metadata } = parsed.data
+    const meta = await getNovelMetaFromOSS(novelId)
+    if (!meta?.chapters.some((c) => c.id === chapterId)) {
       return NextResponse.json({ success: false, error: '章节不存在' }, { status: 404 })
     }
-
-    // 创建版本记录
     const revision = await db.chapterRevision.create({
       data: {
+        novelId,
         chapterId,
         content,
         wordCount,
         source,
         metadata: metadata ? JSON.stringify(metadata) : null,
-      }
+      },
     })
-
     return NextResponse.json({ success: true, revision })
   } catch (error) {
     console.error('Create revision error:', error)
@@ -56,22 +50,18 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// 获取版本历史列表
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const chapterId = searchParams.get('chapterId')
-
     if (!chapterId) {
       return NextResponse.json({ success: false, error: '缺少 chapterId 参数' }, { status: 400 })
     }
-
     const revisions = await db.chapterRevision.findMany({
       where: { chapterId },
       orderBy: { createdAt: 'desc' },
-      take: 50, // 最多返回最近50个版本
+      take: 50,
     })
-
     return NextResponse.json({ success: true, revisions })
   } catch (error) {
     console.error('Get revisions error:', error)
@@ -82,47 +72,52 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// 恢复到指定版本
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json()
     const { revisionId } = body
-
     if (!revisionId) {
       return NextResponse.json({ success: false, error: '缺少 revisionId' }, { status: 400 })
     }
-
-    // 获取指定版本
     const revision = await db.chapterRevision.findUnique({
       where: { id: revisionId },
-      include: { chapter: true }
     })
-
     if (!revision) {
       return NextResponse.json({ success: false, error: '版本不存在' }, { status: 404 })
     }
-
-    // 先保存当前内容为新的版本（以便可以撤销恢复）
+    const { novelId, chapterId } = revision
+    const currentContent = await getChapterContent(novelId, chapterId)
+    const chMeta = (await getNovelMetaFromOSS(novelId))?.chapters.find((c) => c.id === chapterId)
     await db.chapterRevision.create({
       data: {
-        chapterId: revision.chapterId,
-        content: revision.chapter.content,
-        wordCount: revision.chapter.wordCount,
+        novelId,
+        chapterId,
+        content: currentContent,
+        wordCount: currentContent.length,
         source: 'restore',
         metadata: JSON.stringify({ restoredFrom: revisionId }),
-      }
+      },
     })
-
-    // 恢复章节内容
-    const updatedChapter = await db.chapter.update({
-      where: { id: revision.chapterId },
-      data: {
-        content: revision.content,
-        wordCount: revision.wordCount,
-      }
+    await saveChapterContent(novelId, chapterId, revision.content)
+    await updateChapterInIndex(novelId, chapterId, {
+      title: chMeta?.title ?? '章节',
+      wordCount: revision.wordCount,
+      order: chMeta?.order ?? 0,
+      isPublished: chMeta?.isPublished ?? false,
     })
-
-    return NextResponse.json({ success: true, chapter: updatedChapter })
+    await recomputeNovelWordCountFromOss(novelId)
+    const chapter = {
+      id: chapterId,
+      novelId,
+      title: chMeta?.title ?? '章节',
+      content: revision.content,
+      wordCount: revision.wordCount,
+      order: chMeta?.order ?? 0,
+      isPublished: chMeta?.isPublished ?? false,
+      createdAt: chMeta?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    return NextResponse.json({ success: true, chapter })
   } catch (error) {
     console.error('Restore revision error:', error)
     return NextResponse.json(

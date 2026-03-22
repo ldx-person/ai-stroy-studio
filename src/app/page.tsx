@@ -8,7 +8,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
@@ -40,7 +39,8 @@ import {
   CheckCircle2,
   AlertCircle,
   SearchCheck,
-  Download
+  Download,
+  Wrench
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -52,7 +52,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
-import { TTSPlayer, ChapterList, NovelCard, StoryBibleEditor, ExportDialog } from '@/components/novel'
+import { TTSPlayer, EditorChapterList, NovelCard, StoryBibleEditor, ExportDialog } from '@/components/novel'
 
 // Types
 interface Novel {
@@ -71,6 +71,8 @@ interface Novel {
 interface Chapter {
   id: string
   novelId: string
+  /** 第几章（≥1），与标题正文分开存储 */
+  chapterNumber: number
   title: string
   content: string
   wordCount: number
@@ -188,9 +190,30 @@ export default function NovelWriterApp() {
   const [showChapterCheck, setShowChapterCheck] = useState(false)
   const [chapterCheckNovel, setChapterCheckNovel] = useState<Novel | null>(null)
   const [chapterCheckResult, setChapterCheckResult] = useState<{
-    duplicates: Array<{ order: number; chapters: Array<{ id: string; title: string; wordCount: number; contentPreview: string }> }>
+    duplicates: Array<{
+      order: number
+      chapters: Array<{
+        id: string
+        title: string
+        wordCount: number
+        contentPreview: string
+        chapterNumber?: number
+      }>
+    }>
     gaps: number[]
     range: { start: number; end: number }
+    chapterNumberIssues?: {
+      aligned: boolean
+      firstSlotNotChapterOne: boolean
+      mismatches: Array<{
+        sortIndex: number
+        order: number
+        id: string
+        title: string
+        expectedChapterNumber: number
+        actualChapterNumber: number
+      }>
+    }
   } | null>(null)
 
   // Export states
@@ -198,6 +221,7 @@ export default function NovelWriterApp() {
   const [exportNovel, setExportNovel] = useState<Novel | null>(null)
   const [chapterCheckLoading, setChapterCheckLoading] = useState(false)
   const [chapterCheckFilling, setChapterCheckFilling] = useState(false)
+  const [chapterRepairSequenceLoading, setChapterRepairSequenceLoading] = useState(false)
   const [duplicateSelections, setDuplicateSelections] = useState<Record<string, string>>({}) // order -> id to keep
   
   // Edit novel states
@@ -220,10 +244,23 @@ export default function NovelWriterApp() {
   useEffect(() => {
     let isMounted = true
     const fetchNovels = async () => {
+      const parseJson = async (res: Response) => {
+        const ct = res.headers.get('content-type') || ''
+        if (!ct.includes('application/json')) {
+          const text = await res.text()
+          throw new Error(`服务器返回非 JSON (${res.status}): ${text.slice(0, 200)}`)
+        }
+        return res.json()
+      }
+
       try {
         // 第一步：立即加载本地数据库中的小说列表，快速展示给用户
         const res = await fetch('/api/novels')
-        const data = await res.json()
+        const data = await parseJson(res)
+        if (!res.ok) {
+          console.error('Failed to fetch novels:', data.error || res.status)
+          return
+        }
         if (data.success && isMounted) {
           setNovels(data.novels)
         }
@@ -233,19 +270,27 @@ export default function NovelWriterApp() {
 
       // 第二步：后台异步执行 OSS 同步，不阻塞页面渲染
       fetch('/api/oss/sync')
-        .then(r => r.json())
-        .then(syncData => {
-          if (!isMounted) return
+        .then(async (r) => {
+          try {
+            return await parseJson(r)
+          } catch (e) {
+            console.log('OSS 同步响应非 JSON，已跳过:', e)
+            return null
+          }
+        })
+        .then((syncData) => {
+          if (!isMounted || !syncData) return
           if (syncData.success && syncData.syncedCount > 0) {
             console.log(`从OSS同步了 ${syncData.syncedCount} 本小说，刷新列表`)
-            // 同步完成后刷新小说列表
             fetch('/api/novels')
-              .then(r => r.json())
-              .then(d => { if (d.success && isMounted) setNovels(d.novels) })
+              .then((r) => parseJson(r))
+              .then((d) => {
+                if (d.success && isMounted) setNovels(d.novels)
+              })
               .catch(() => {})
           }
         })
-        .catch(syncError => console.log('OSS同步跳过:', syncError))
+        .catch((syncError) => console.log('OSS同步跳过:', syncError))
     }
     fetchNovels()
     return () => { isMounted = false }
@@ -270,8 +315,8 @@ export default function NovelWriterApp() {
 
   // Save chapter content - must be defined before auto-save useEffect
   const saveChapterContent = useCallback(async (content: string) => {
-    if (!currentChapter) return
-    
+    if (!currentChapter || !currentNovel) return
+
     const wordCount = content.length
     try {
       const res = await fetch('/api/chapters', {
@@ -279,19 +324,23 @@ export default function NovelWriterApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: currentChapter.id,
+          novelId: currentNovel.id,
           content,
           wordCount
         })
       })
       const data = await res.json()
-      if (data.success) {
+      if (data.success && data.chapter) {
+        const ch = data.chapter as Chapter
         if (currentNovel) {
-          const updatedChapters = currentNovel.chapters.map(ch => 
-            ch.id === currentChapter.id ? { ...ch, content, wordCount } : ch
-          )
+          const idx = currentNovel.chapters.findIndex((x) => x.id === ch.id)
+          const updatedChapters =
+            idx >= 0
+              ? currentNovel.chapters.map((x) => (x.id === ch.id ? { ...x, ...ch } : x))
+              : [...currentNovel.chapters, ch]
           setCurrentNovel({ ...currentNovel, chapters: updatedChapters })
         }
-        setCurrentChapter({ ...currentChapter, content, wordCount })
+        setCurrentChapter((prev) => (prev && prev.id === ch.id ? { ...prev, ...ch } : prev))
       }
     } catch (error) {
       console.error('Auto-save failed:', error)
@@ -438,10 +487,27 @@ export default function NovelWriterApp() {
       const data = await res.json()
       if (data.success) {
         setCurrentNovel(data.novel)
-        if (data.novel.chapters.length > 0) {
-          const firstChapter = data.novel.chapters.sort((a: Chapter, b: Chapter) => a.order - b.order)[0]
-          setCurrentChapter(firstChapter)
-          setEditingContent(firstChapter.content)
+        // 详情 API 只返回章节目录（无正文），避免数百章巨型 JSON；当前章正文单独 GET /api/chapters
+        const sorted = [...data.novel.chapters].sort((a: Chapter, b: Chapter) => a.order - b.order)
+        if (sorted.length > 0) {
+          const first = sorted[0]
+          try {
+            const chRes = await fetch(
+              `/api/chapters?id=${encodeURIComponent(first.id)}&novelId=${encodeURIComponent(data.novel.id)}`
+            )
+            const chData = await chRes.json()
+            if (chData.success && chData.chapter) {
+              const fc = chData.chapter as Chapter
+              setCurrentChapter(fc)
+              setEditingContent(fc.content || '')
+            } else {
+              setCurrentChapter(first)
+              setEditingContent(first.content || '')
+            }
+          } catch {
+            setCurrentChapter(first)
+            setEditingContent(first.content || '')
+          }
         } else {
           setCurrentChapter(null)
           setEditingContent('')
@@ -493,9 +559,13 @@ export default function NovelWriterApp() {
   // Delete chapter
   const handleDeleteChapter = async (chapterId: string) => {
     if (!confirm('确定要删除这个章节吗？')) return
-    
+    if (!currentNovel) return
+
     try {
-      const res = await fetch(`/api/chapters?id=${chapterId}`, { method: 'DELETE' })
+      const res = await fetch(
+        `/api/chapters?id=${encodeURIComponent(chapterId)}&novelId=${encodeURIComponent(currentNovel.id)}`,
+        { method: 'DELETE' }
+      )
       const data = await res.json()
       if (data.success && currentNovel) {
         const updatedChapters = currentNovel.chapters.filter(ch => ch.id !== chapterId)
@@ -504,9 +574,7 @@ export default function NovelWriterApp() {
         
         if (currentChapter?.id === chapterId) {
           if (updatedChapters.length > 0) {
-            const firstChapter = updatedChapters.sort((a, b) => a.order - b.order)[0]
-            setCurrentChapter(firstChapter)
-            setEditingContent(firstChapter.content)
+            void selectChapter(updatedChapters.sort((a, b) => a.order - b.order)[0])
           } else {
             setCurrentChapter(null)
             setEditingContent('')
@@ -552,63 +620,92 @@ export default function NovelWriterApp() {
       }
     } catch (error) {
       toast({ title: 'AI生成失败', variant: 'destructive' })
+    } finally {
+      setIsAILoading(false)
     }
-    setIsAILoading(false)
   }
 
   // AI Suggest Title
   const handleAITitle = async () => {
-    if (!editingContent) {
-      toast({ title: '请先写一些内容', variant: 'destructive' })
+    const text = (editingContent || '').trim()
+    if (text.length < 8) {
+      toast({
+        title: '请先多写一些正文',
+        description: '至少约 8 个字符，便于 AI 概括章节主题',
+        variant: 'destructive',
+      })
       return
     }
-    
+    if (!currentChapter || !currentNovel) {
+      toast({ title: '请先选择章节', variant: 'destructive' })
+      return
+    }
+
     setIsAILoading(true)
     setAiMode('continue')
-    
+
     try {
       const res = await fetch('/api/ai/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'title', input: { scope: 'chapter', text: editingContent }, options: { variants: 1 } })
+        body: JSON.stringify({
+          action: 'title',
+          novelId: currentNovel.id,
+          input: { scope: 'chapter', text },
+          options: { variants: 1 },
+        }),
       })
       const data = await res.json()
-      let title = data?.candidates?.[0]?.text?.trim()
-      if (data.success && currentChapter && title) {
-        // 保留原有的章节号前缀（如"第X章"）
-        const originalTitle = currentChapter.title
-        const chapterPrefixMatch = originalTitle.match(/^(第[一二三四五六七八九十百千\d]+章\s*)/)
-        if (chapterPrefixMatch) {
-          // 移除新标题中可能已有的章节号前缀
-          const cleanTitle = title.replace(/^(第[一二三四五六七八九十百千\d]+章\s*)/, '')
-          title = chapterPrefixMatch[1] + cleanTitle
-        }
-        
-        const res2 = await fetch('/api/chapters', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: currentChapter.id,
-            title
-          })
+      if (!res.ok || !data.success) {
+        toast({
+          title: '生成标题失败',
+          description: typeof data.error === 'string' ? data.error : `HTTP ${res.status}`,
+          variant: 'destructive',
         })
-        const data2 = await res2.json()
-        if (data2.success) {
-          const updatedChapter = { ...currentChapter, title }
-          setCurrentChapter(updatedChapter)
-          if (currentNovel) {
-            const updatedChapters = currentNovel.chapters.map(ch => 
-              ch.id === currentChapter.id ? updatedChapter : ch
-            )
-            setCurrentNovel({ ...currentNovel, chapters: updatedChapters })
-          }
-          toast({ title: '标题已更新！' })
-        }
+        return
       }
-    } catch (error) {
-      toast({ title: 'AI生成失败', variant: 'destructive' })
+      const raw = data?.candidates?.[0]?.text?.trim()
+      const title = raw
+        ? raw.replace(/^第\s*\d+\s*章\s*[、:：.\s]*/u, '').replace(/^["'「」『』]+|["'「」『』]+$/g, '').trim() || raw
+        : ''
+      if (!title) {
+        toast({
+          title: 'AI 未返回有效标题',
+          description: '请重试，或检查 .env.local：ZAI_* / ALIYUN_AI_API_KEY+BASE_URL / 模型名是否与服务商一致',
+          variant: 'destructive',
+        })
+        return
+      }
+      const res2 = await fetch('/api/chapters', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: currentChapter.id,
+          novelId: currentNovel.id,
+          title,
+        }),
+      })
+      const data2 = await res2.json()
+      if (!res2.ok || !data2.success || !data2.chapter) {
+        toast({
+          title: '保存标题失败',
+          description: typeof data2.error === 'string' ? data2.error : `HTTP ${res2.status}`,
+          variant: 'destructive',
+        })
+        return
+      }
+      const updatedChapter = data2.chapter as Chapter
+      setCurrentChapter(updatedChapter)
+      const updatedChapters = currentNovel.chapters.map((ch) =>
+        ch.id === currentChapter.id ? updatedChapter : ch
+      )
+      setCurrentNovel({ ...currentNovel, chapters: updatedChapters })
+      toast({ title: '标题已更新！', description: title })
+    } catch {
+      toast({ title: '网络异常', description: '请稍后重试', variant: 'destructive' })
+    } finally {
+      setIsAILoading(false)
     }
-    setIsAILoading(false)
   }
 
   // Apply AI suggestion
@@ -616,10 +713,12 @@ export default function NovelWriterApp() {
   const saveRevision = async (source: string, metadata?: Record<string, unknown>) => {
     if (!currentChapter) return
     try {
+      if (!currentNovel) return
       await fetch('/api/chapters/revisions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          novelId: currentNovel.id,
           chapterId: currentChapter.id,
           content: editingContent,
           wordCount: editingContent.length,
@@ -701,8 +800,9 @@ export default function NovelWriterApp() {
     } catch (error) {
       console.error('AI action error:', error)
       toast({ title: 'AI 优化失败', variant: 'destructive' })
+    } finally {
+      setIsAILoading(false)
     }
-    setIsAILoading(false)
   }
 
   const handleAIDescribe = async (subAction: 'environment' | 'emotion' | 'action' | 'dialogue') => {
@@ -744,8 +844,9 @@ export default function NovelWriterApp() {
     } catch (error) {
       console.error('AI describe error:', error)
       toast({ title: 'AI 描写增强失败', variant: 'destructive' })
+    } finally {
+      setIsAILoading(false)
     }
-    setIsAILoading(false)
   }
 
   // Get original text for diff (selection or full chapter)
@@ -771,13 +872,9 @@ export default function NovelWriterApp() {
     const currentIndex = sortedChapters.findIndex(ch => ch.id === currentChapter.id)
     
     if (direction === 'prev' && currentIndex > 0) {
-      const prevChapter = sortedChapters[currentIndex - 1]
-      setCurrentChapter(prevChapter)
-      setEditingContent(prevChapter.content)
+      void selectChapter(sortedChapters[currentIndex - 1])
     } else if (direction === 'next' && currentIndex < sortedChapters.length - 1) {
-      const nextChapter = sortedChapters[currentIndex + 1]
-      setCurrentChapter(nextChapter)
-      setEditingContent(nextChapter.content)
+      void selectChapter(sortedChapters[currentIndex + 1])
     }
     setShowChapterSheet(false)
   }
@@ -844,6 +941,7 @@ export default function NovelWriterApp() {
             novelId: currentNovel.id,
             title: chapter.title,
             order: chapterIndex,
+            chapterNumber: chapterIndex + 1,
             content: data.candidates[0].text
           })
         })
@@ -856,8 +954,9 @@ export default function NovelWriterApp() {
       }
     } catch (error) {
       toast({ title: '生成开头失败', variant: 'destructive' })
+    } finally {
+      setIsAILoading(false)
     }
-    setIsAILoading(false)
   }
 
   const batchGenerateOpenings = async () => {
@@ -1116,32 +1215,59 @@ export default function NovelWriterApp() {
     }
   }
 
-  // Select chapter
+  // Select chapter（始终拉取最新索引：正文 + chapterNumber + 标题）
   const selectChapter = async (chapter: Chapter) => {
     try {
-      let fullChapter = chapter
-
-      // 有些从目录或索引来的章节只有字数，没有正文，这里补一次拉取，避免出现「字数有、文本空白」
-      if (!chapter.content && chapter.wordCount > 0) {
-        const res = await fetch(`/api/chapters?id=${chapter.id}`)
-        const data = await res.json()
-        if (data.success && data.chapter) {
-          fullChapter = data.chapter as Chapter
-        }
+      const res = await fetch(
+        `/api/chapters?id=${encodeURIComponent(chapter.id)}&novelId=${encodeURIComponent(chapter.novelId)}`
+      )
+      const data = await res.json()
+      if (data.success && data.chapter) {
+        const fullChapter = data.chapter as Chapter
+        setCurrentChapter(fullChapter)
+        setEditingContent(fullChapter.content || '')
+        setAiSuggestion('')
+        setShowChapterSheet(false)
+        return
       }
-
-      setCurrentChapter(fullChapter)
-      setEditingContent(fullChapter.content || '')
-      setAiSuggestion('')
-      setShowChapterSheet(false)
     } catch (error) {
       console.error('Select chapter error:', error)
-      setCurrentChapter(chapter)
-      setEditingContent(chapter.content || '')
-      setAiSuggestion('')
-      setShowChapterSheet(false)
     }
+    setCurrentChapter(chapter)
+    setEditingContent(chapter.content || '')
+    setAiSuggestion('')
+    setShowChapterSheet(false)
   }
+
+  /** 保存章节号 + 标题（不含正文） */
+  const saveChapterHeading = useCallback(async () => {
+    if (!currentChapter || !currentNovel) return
+    const num = currentChapter.chapterNumber ?? currentChapter.order + 1
+    if (!Number.isFinite(num) || num < 1) return
+    try {
+      const res = await fetch('/api/chapters', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: currentChapter.id,
+          novelId: currentNovel.id,
+          title: currentChapter.title,
+          chapterNumber: Math.floor(num),
+        }),
+      })
+      const data = await res.json()
+      if (data.success && data.chapter) {
+        const ch = data.chapter as Chapter
+        setCurrentChapter(ch)
+        setCurrentNovel({
+          ...currentNovel,
+          chapters: currentNovel.chapters.map((x) => (x.id === ch.id ? ch : x)),
+        })
+      }
+    } catch (e) {
+      console.error('Save chapter heading failed:', e)
+    }
+  }, [currentChapter, currentNovel])
 
   // Status badge color
   const getStatusBadge = (status: string) => {
@@ -1345,7 +1471,12 @@ export default function NovelWriterApp() {
       })
       const data = await res.json()
       if (data.success) {
-        setChapterCheckResult({ duplicates: data.duplicates, gaps: data.gaps, range: data.range })
+        setChapterCheckResult({
+          duplicates: data.duplicates,
+          gaps: data.gaps,
+          range: data.range,
+          chapterNumberIssues: data.chapterNumberIssues,
+        })
         data.duplicates?.forEach((d: { order: number; chapters: { id: string }[] }) => {
           setDuplicateSelections(prev => ({ ...prev, [String(d.order)]: d.chapters[0]?.id || '' }))
         })
@@ -1359,32 +1490,122 @@ export default function NovelWriterApp() {
     }
   }
 
+  /** 按当前 order 将 chapterNumber 重排为 1..n，并剥离标题中的旧「第N章」前缀（仅改 chapters.json） */
+  const handleRepairChapterSequence = async () => {
+    if (!chapterCheckNovel || (chapterCheckResult?.duplicates?.length ?? 0) > 0) return
+    setChapterRepairSequenceLoading(true)
+    try {
+      const res = await fetch('/api/chapters/repair-sequence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ novelId: chapterCheckNovel.id, confirm: true }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        toast({ title: data.error || '修复失败', variant: 'destructive' })
+        return
+      }
+      toast({
+        title: '章号已按阅读顺序修复',
+        description: data.message,
+      })
+      const novelsRes = await fetch('/api/novels')
+      const novelsData = await novelsRes.json()
+      if (novelsData.success) setNovels(novelsData.novels)
+      if (currentNovel?.id === chapterCheckNovel.id) {
+        const detailRes = await fetch(`/api/novels/${chapterCheckNovel.id}`)
+        const detailData = await detailRes.json()
+        if (detailData.success) {
+          setCurrentNovel(detailData.novel)
+          if (currentChapter) {
+            const updated = detailData.novel.chapters.find((c: Chapter) => c.id === currentChapter.id)
+            if (updated) setCurrentChapter(updated)
+          }
+        }
+      }
+      await handleChapterCheck()
+    } catch {
+      toast({ title: '修复失败', variant: 'destructive' })
+    } finally {
+      setChapterRepairSequenceLoading(false)
+    }
+  }
+
   const handleDeleteDuplicates = async () => {
     if (!chapterCheckResult?.duplicates || !chapterCheckNovel) return
     const toDelete: string[] = []
     for (const dup of chapterCheckResult.duplicates) {
       const keepId = duplicateSelections[String(dup.order)] || dup.chapters[0]?.id
-      dup.chapters.filter(c => c.id !== keepId).forEach(c => toDelete.push(c.id))
+      dup.chapters.filter((c) => c.id !== keepId).forEach((c) => toDelete.push(c.id))
     }
     if (toDelete.length === 0) {
-      toast({ title: '请选择要保留的章节' })
+      toast({
+        title: '没有可删除的重复章节',
+        description: '若列表异常请关闭弹窗后重新检测',
+        variant: 'destructive',
+      })
       return
     }
+    const deletedCurrentId =
+      currentChapter?.id && toDelete.includes(currentChapter.id) ? currentChapter.id : null
+    let ok = 0
+    let fail = 0
     try {
       for (const id of toDelete) {
-        await fetch(`/api/chapters?id=${id}`, { method: 'DELETE' })
+        const res = await fetch(
+          `/api/chapters?id=${encodeURIComponent(id)}&novelId=${encodeURIComponent(chapterCheckNovel.id)}`,
+          { method: 'DELETE' }
+        )
+        let data: { success?: boolean } = {}
+        try {
+          data = await res.json()
+        } catch {
+          /* ignore */
+        }
+        if (res.ok && data.success) ok++
+        else fail++
       }
-      toast({ title: `已删除 ${toDelete.length} 个重复章节` })
+
+      if (ok === 0) {
+        toast({
+          title: '删除失败',
+          description: fail ? `${fail} 个请求均未成功` : '请检查网络或权限',
+          variant: 'destructive',
+        })
+        return
+      }
+
+      toast({
+        title: fail > 0 ? `已删除 ${ok} 章，${fail} 章失败` : `已删除 ${ok} 个重复章节`,
+        variant: fail > 0 ? 'destructive' : 'default',
+      })
+
       const novelsRes = await fetch('/api/novels')
       const novelsData = await novelsRes.json()
       if (novelsData.success) {
         setNovels(novelsData.novels)
         if (chapterCheckNovel?.id === currentNovel?.id) {
           const updated = novelsData.novels.find((n: Novel) => n.id === chapterCheckNovel.id)
-          if (updated) setCurrentNovel(updated)
+          if (updated) {
+            setCurrentNovel(updated)
+            if (deletedCurrentId) {
+              const remaining = [...updated.chapters].sort((a, b) => a.order - b.order)
+              if (remaining.length > 0) {
+                await selectChapter(remaining[0])
+              } else {
+                setCurrentChapter(null)
+                setEditingContent('')
+              }
+            }
+          }
         }
       }
-      setChapterCheckResult(prev => prev ? { ...prev, duplicates: [] } : null)
+
+      if (fail > 0) {
+        await handleChapterCheck()
+      } else {
+        setChapterCheckResult((prev) => (prev ? { ...prev, duplicates: [] } : null))
+      }
     } catch {
       toast({ title: '删除失败', variant: 'destructive' })
     }
@@ -1392,6 +1613,14 @@ export default function NovelWriterApp() {
 
   const handleFillGaps = async () => {
     if (!chapterCheckResult?.gaps?.length || !chapterCheckNovel) return
+    if (chapterCheckResult.duplicates.length > 0) {
+      toast({
+        title: '请先处理重复章节',
+        description: '存在相同排序位的多章时补全可能衔接错误，请先删除重复后再一键补全',
+        variant: 'destructive',
+      })
+      return
+    }
     setChapterCheckFilling(true)
     try {
       const res = await fetch('/api/ai/fill-gaps', {
@@ -1417,7 +1646,15 @@ export default function NovelWriterApp() {
         }
         setChapterCheckResult(prev => prev ? { ...prev, gaps: [] } : null)
       } else {
-        toast({ title: data.error || '补全失败', variant: 'destructive' })
+        const msg = data.error || '补全失败'
+        toast({
+          title: msg,
+          description:
+            res.status === 409
+              ? '请先在上方处理「重复章节」后再试'
+              : undefined,
+          variant: 'destructive',
+        })
       }
     } catch {
       toast({ title: '补全失败', variant: 'destructive' })
@@ -1425,98 +1662,6 @@ export default function NovelWriterApp() {
       setChapterCheckFilling(false)
     }
   }
-
-  // Chapter List Component (reusable). When hideHeaderRow, only list (desktop sidebar has 章节目录+新建 in CardHeader).
-  const ChapterListComponent = ({ inSheet = false, hideHeaderRow = false }: { inSheet?: boolean; hideHeaderRow?: boolean }) => (
-    <div className={inSheet ? 'py-2' : 'flex flex-col flex-1 min-h-0'}>
-      {!hideHeaderRow && (
-        <div className="flex items-center justify-between mb-3">
-          {inSheet && <h3 className="font-semibold">章节目录</h3>}
-          <DialogTrigger asChild>
-            <Button variant="ghost" size="sm" className="gap-1">
-              <Plus className="w-4 h-4" />
-              新建
-            </Button>
-          </DialogTrigger>
-        </div>
-      )}
-      {inSheet ? (
-        <ScrollArea className="h-[60vh]">
-          <div className="space-y-1">
-          {[...currentNovel?.chapters || []]
-            .sort((a, b) => a.order - b.order)
-            .map((chapter) => (
-            <div
-              key={chapter.id}
-              className={`group flex items-center gap-2 px-3 py-3 rounded-lg cursor-pointer transition-colors touch-manipulation ${
-                currentChapter?.id === chapter.id
-                  ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
-                  : 'hover:bg-muted active:bg-muted'
-              }`}
-              onClick={() => selectChapter(chapter)}
-            >
-              <FileText className="w-4 h-4 shrink-0" />
-              <span className="flex-1 truncate text-sm">{chapter.title}</span>
-              <span className="text-xs text-muted-foreground">{chapter.wordCount}字</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 opacity-0 group-hover:opacity-100 touch-manipulation"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleDeleteChapter(chapter.id)
-                }}
-              >
-                <Trash2 className="w-4 h-4 text-red-500" />
-              </Button>
-            </div>
-          ))}
-          {currentNovel?.chapters.length === 0 && (
-            <div className="text-center py-8 text-muted-foreground text-sm">
-              暂无章节<br />点击上方新建
-            </div>
-          )}
-          </div>
-        </ScrollArea>
-      ) : (
-        <div className="max-h-[70vh] overflow-y-auto px-2 pb-2">
-          {[...currentNovel?.chapters || []]
-            .sort((a, b) => a.order - b.order)
-            .map((chapter) => (
-            <div
-              key={chapter.id}
-              className={`group flex items-center gap-2 px-3 py-3 rounded-lg cursor-pointer transition-colors touch-manipulation ${
-                currentChapter?.id === chapter.id
-                  ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
-                  : 'hover:bg-muted active:bg-muted'
-              }`}
-              onClick={() => selectChapter(chapter)}
-            >
-              <FileText className="w-4 h-4 shrink-0" />
-              <span className="flex-1 truncate text-sm">{chapter.title}</span>
-              <span className="text-xs text-muted-foreground">{chapter.wordCount}字</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 opacity-0 group-hover:opacity-100 touch-manipulation"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleDeleteChapter(chapter.id)
-                }}
-              >
-                <Trash2 className="w-4 h-4 text-red-500" />
-              </Button>
-            </div>
-          ))}
-          {currentNovel?.chapters.length === 0 && (
-            <div className="text-center py-8 text-muted-foreground text-sm">
-              暂无章节<br />点击上方新建
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -1972,7 +2117,7 @@ export default function NovelWriterApp() {
                     章节检测
                   </DialogTitle>
                   <DialogDescription>
-                    检测章节重复与缺失，支持删除重复、一键补全缺失
+                    检测重复/缺失（按排序位 order），以及按顺序是否从「第1章」连续编号；支持删除重复、一键补全缺失
                   </DialogDescription>
                 </DialogHeader>
                 <div className="flex-1 overflow-y-auto space-y-4 py-4">
@@ -2011,7 +2156,13 @@ export default function NovelWriterApp() {
                                     <div key={ch.id} className="flex items-center space-x-2">
                                       <RadioGroupItem value={ch.id} id={`dup-${dup.order}-${ch.id}`} />
                                       <Label htmlFor={`dup-${dup.order}-${ch.id}`} className="font-normal cursor-pointer flex-1">
+                                        {ch.chapterNumber != null ? `第${ch.chapterNumber}章 ` : ''}
                                         {ch.title} · {ch.wordCount}字
+                                        {ch.contentPreview ? (
+                                          <span className="block text-xs text-muted-foreground mt-0.5 truncate">
+                                            {ch.contentPreview}
+                                          </span>
+                                        ) : null}
                                       </Label>
                                     </div>
                                   ))}
@@ -2025,25 +2176,97 @@ export default function NovelWriterApp() {
                           </Button>
                         </div>
                       )}
+                      {chapterCheckResult.chapterNumberIssues &&
+                        !chapterCheckResult.chapterNumberIssues.aligned && (
+                          <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50/80 p-3 dark:border-amber-900 dark:bg-amber-950/30">
+                            <h4 className="font-medium text-amber-800 dark:text-amber-200">
+                              章号与阅读顺序不一致
+                            </h4>
+                            <p className="text-xs text-muted-foreground">
+                              按章节列表排序（order 升序）时，第 1 条应为「第 1 章」，第 2 条为「第 2 章」，依此类推。以下条目上的「第 N 章」与应有位置不符
+                              {chapterCheckResult.chapterNumberIssues.firstSlotNotChapterOne
+                                ? '（首章不是第 1 章）'
+                                : ''}
+                              。
+                            </p>
+                            <ul className="max-h-40 space-y-1 overflow-y-auto text-sm">
+                              {chapterCheckResult.chapterNumberIssues.mismatches.slice(0, 50).map((m) => (
+                                <li key={m.id} className="text-amber-900 dark:text-amber-100">
+                                  第 {m.sortIndex + 1} 位（order={m.order}）：应为第 {m.expectedChapterNumber} 章，当前为第{' '}
+                                  {m.actualChapterNumber} 章 · {m.title}
+                                </li>
+                              ))}
+                            </ul>
+                            {chapterCheckResult.chapterNumberIssues.mismatches.length > 50 && (
+                              <p className="text-xs text-muted-foreground">
+                                …共 {chapterCheckResult.chapterNumberIssues.mismatches.length} 条
+                              </p>
+                            )}
+                            <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:flex-wrap sm:items-center">
+                              <Button
+                                type="button"
+                                variant="default"
+                                size="sm"
+                                className="bg-amber-600 hover:bg-amber-700 dark:bg-amber-700 dark:hover:bg-amber-600"
+                                disabled={
+                                  chapterRepairSequenceLoading ||
+                                  chapterCheckResult.duplicates.length > 0
+                                }
+                                title={
+                                  chapterCheckResult.duplicates.length > 0
+                                    ? '请先处理上方重复章节'
+                                    : undefined
+                                }
+                                onClick={handleRepairChapterSequence}
+                              >
+                                {chapterRepairSequenceLoading ? (
+                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Wrench className="mr-2 h-4 w-4" />
+                                )}
+                                一键修复章号与顺序
+                              </Button>
+                              <p className="text-xs text-muted-foreground">
+                                按当前列表顺序将第 1 条标为第 1 章…依次重排；标题里「第29章」等前缀会去掉，正文 .txt 不改。
+                              </p>
+                            </div>
+                          </div>
+                        )}
                       {chapterCheckResult.gaps.length > 0 && (
                         <div className="space-y-2">
                           <h4 className="font-medium text-amber-600 dark:text-amber-400">缺失章节</h4>
                           <p className="text-sm text-muted-foreground">
                             第 {chapterCheckResult.gaps.map(o => o + 1).join('、')} 章缺失
                           </p>
+                          {chapterCheckResult.duplicates.length > 0 && (
+                            <p className="text-xs text-destructive">
+                              当前仍有重复章节，请先处理重复后再补全，避免 AI 衔接上下文错误。
+                            </p>
+                          )}
                           <Button
                             onClick={handleFillGaps}
-                            disabled={chapterCheckFilling}
+                            disabled={
+                              chapterCheckFilling || chapterCheckResult.duplicates.length > 0
+                            }
+                            title={
+                              chapterCheckResult.duplicates.length > 0
+                                ? '请先处理上方的重复章节'
+                                : undefined
+                            }
                           >
                             {chapterCheckFilling ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
                             一键补全
                           </Button>
                         </div>
                       )}
-                      {chapterCheckResult.duplicates.length === 0 && chapterCheckResult.gaps.length === 0 && (
+                      {chapterCheckResult.duplicates.length === 0 &&
+                        chapterCheckResult.gaps.length === 0 &&
+                        chapterCheckResult.chapterNumberIssues?.aligned !== false && (
                         <div className="flex items-center gap-2 p-4 bg-green-50 dark:bg-green-950/20 rounded-lg">
                           <CheckCircle2 className="w-5 h-5 text-green-500" />
-                          <span className="text-green-700 dark:text-green-300">未发现重复或缺失</span>
+                          <span className="text-green-700 dark:text-green-300">
+                            未发现重复、缺失，且章号与阅读顺序一致（从第 1 章起连续）
+                          </span>
                         </div>
                       )}
                     </div>
@@ -2199,11 +2422,11 @@ export default function NovelWriterApp() {
         {/* Editor View */}
         {viewMode === 'editor' && currentNovel && (
           <Dialog open={isCreatingChapter} onOpenChange={setIsCreatingChapter}>
-            <div className="flex gap-4 min-h-0 flex-1 pb-6 md:pb-8">
-              {/* Desktop Sidebar - Chapter List */}
-              <div className="w-64 shrink-0 hidden md:flex md:flex-col md:min-h-0">
-                <Card className="h-full flex flex-col min-h-0">
-                  <CardHeader className="pb-2 shrink-0 flex flex-row items-center justify-between gap-2">
+            <div className="flex min-h-0 min-w-0 flex-1 items-stretch gap-4 pb-6 md:h-[calc(100dvh-10.5rem)] md:max-h-[calc(100dvh-10.5rem)] md:min-h-0 md:overflow-hidden md:pb-8">
+              {/* Desktop Sidebar - Chapter List（高度受限于视口，目录在卡片内滚动，避免整页被撑开） */}
+              <div className="hidden min-h-0 w-64 max-h-full shrink-0 flex-col self-stretch md:flex md:h-full md:max-h-full">
+                <Card className="flex h-full min-h-0 max-h-full flex-col overflow-hidden py-0 gap-0 shadow-sm">
+                  <CardHeader className="flex shrink-0 flex-row items-center justify-between gap-2 border-b px-6 py-3">
                     <CardTitle className="text-base">章节目录</CardTitle>
                     <DialogTrigger asChild>
                       <Button variant="ghost" size="sm" className="gap-1 shrink-0">
@@ -2212,14 +2435,24 @@ export default function NovelWriterApp() {
                       </Button>
                     </DialogTrigger>
                   </CardHeader>
-                  <CardContent className="p-0 flex-1 flex flex-col min-h-0 overflow-hidden">
-                    <ChapterListComponent hideHeaderRow />
+                  {/* 外层 overflow-hidden + 内层滚动：h-0+flex-1+min-h-0 保证在 Windows/flex 下获得有限高度；overflow-y-scroll 始终预留滚动条轨道 */}
+                  <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+                    <div className="h-0 min-h-0 flex-1 overflow-y-scroll overflow-x-hidden overscroll-y-contain [scrollbar-gutter:stable] md:max-h-[calc(100dvh-13.5rem)]">
+                      <EditorChapterList
+                        variant="sidebar"
+                        hideHeaderRow
+                        chapters={currentNovel?.chapters ?? []}
+                        currentChapterId={currentChapter?.id}
+                        onSelectChapter={selectChapter}
+                        onDeleteChapter={handleDeleteChapter}
+                      />
+                    </div>
                   </CardContent>
                 </Card>
               </div>
 
             {/* Main Editor */}
-            <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-y-auto">
+            <div className="flex h-full max-h-full min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
               {currentChapter ? (
                 <>
                   {/* Mobile Chapter Header */}
@@ -2229,14 +2462,23 @@ export default function NovelWriterApp() {
                         <SheetTrigger asChild>
                           <Button variant="outline" size="sm" className="gap-2">
                             <List className="w-4 h-4" />
-                            <span className="truncate max-w-[150px]">{currentChapter.title}</span>
+                            <span className="truncate max-w-[160px]">
+                              第{currentChapter.chapterNumber ?? currentChapter.order + 1}章 {currentChapter.title}
+                            </span>
                           </Button>
                         </SheetTrigger>
                         <SheetContent side="left" className="w-[280px]">
                           <SheetHeader>
                             <SheetTitle>{currentNovel.title}</SheetTitle>
                           </SheetHeader>
-                          <ChapterListComponent inSheet />
+                          <EditorChapterList
+                            variant="sheet"
+                            showInlineCreateTrigger
+                            chapters={currentNovel?.chapters ?? []}
+                            currentChapterId={currentChapter?.id}
+                            onSelectChapter={selectChapter}
+                            onDeleteChapter={handleDeleteChapter}
+                          />
                         </SheetContent>
                       </Sheet>
                       <div className="flex items-center gap-1">
@@ -2264,34 +2506,48 @@ export default function NovelWriterApp() {
 
                   {/* Desktop Chapter Header */}
                   {!isMobile && (
-                    <div className="flex items-center justify-between mb-4">
-                      <Input
-                        value={currentChapter.title}
-                        className="text-xl font-semibold border-none shadow-none focus-visible:ring-0 px-0"
-                        onChange={async (e) => {
-                          const newTitle = e.target.value
-                          const updatedChapter = { ...currentChapter, title: newTitle }
-                          setCurrentChapter(updatedChapter)
-                          if (currentNovel) {
-                            const updatedChapters = currentNovel.chapters.map(ch => 
-                              ch.id === currentChapter.id ? updatedChapter : ch
-                            )
-                            setCurrentNovel({ ...currentNovel, chapters: updatedChapters })
-                          }
-                        }}
-                        onBlur={async () => {
-                          if (currentChapter) {
-                            await fetch('/api/chapters', {
-                              method: 'PUT',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({
-                                id: currentChapter.id,
-                                title: currentChapter.title
-                              })
-                            })
-                          }
-                        }}
-                      />
+                    <div className="flex items-center justify-between mb-4 gap-2">
+                      <div className="flex items-center gap-1 md:gap-2 flex-1 min-w-0">
+                        <span className="text-sm text-muted-foreground shrink-0">第</span>
+                        <Input
+                          type="number"
+                          min={1}
+                          aria-label="章节序号"
+                          className="w-12 md:w-14 text-center tabular-nums text-lg md:text-xl font-semibold border-none shadow-none focus-visible:ring-0 px-0 shrink-0"
+                          value={currentChapter.chapterNumber ?? currentChapter.order + 1}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10)
+                            if (!Number.isFinite(v) || v < 1) return
+                            const updatedChapter = { ...currentChapter, chapterNumber: v }
+                            setCurrentChapter(updatedChapter)
+                            if (currentNovel) {
+                              const updatedChapters = currentNovel.chapters.map((ch) =>
+                                ch.id === currentChapter.id ? updatedChapter : ch
+                              )
+                              setCurrentNovel({ ...currentNovel, chapters: updatedChapters })
+                            }
+                          }}
+                          onBlur={saveChapterHeading}
+                        />
+                        <span className="text-sm text-muted-foreground shrink-0">章</span>
+                        <Input
+                          value={currentChapter.title}
+                          aria-label="章节标题"
+                          className="text-lg md:text-xl font-semibold border-none shadow-none focus-visible:ring-0 px-0 flex-1 min-w-0"
+                          onChange={(e) => {
+                            const newTitle = e.target.value
+                            const updatedChapter = { ...currentChapter, title: newTitle }
+                            setCurrentChapter(updatedChapter)
+                            if (currentNovel) {
+                              const updatedChapters = currentNovel.chapters.map((ch) =>
+                                ch.id === currentChapter.id ? updatedChapter : ch
+                              )
+                              setCurrentNovel({ ...currentNovel, chapters: updatedChapters })
+                            }
+                          }}
+                          onBlur={saveChapterHeading}
+                        />
+                      </div>
                       <div className="flex items-center gap-2 text-sm text-muted-foreground">
                         <Button 
                           size="sm" 
@@ -2725,10 +2981,10 @@ export default function NovelWriterApp() {
             </DialogHeader>
             <div className="space-y-4 py-4">
               <div className="space-y-2">
-                <Label htmlFor="chapter-title">章节标题</Label>
+                <Label htmlFor="chapter-title">章节标题（仅正文，勿含「第N章」）</Label>
                 <Input
                   id="chapter-title"
-                  placeholder="例如：第一章 初入江湖"
+                  placeholder="例如：初入江湖、风起长林"
                   value={newChapter.title}
                   onChange={(e) => setNewChapter({ ...newChapter, title: e.target.value })}
                 />
@@ -2785,7 +3041,14 @@ export default function NovelWriterApp() {
                 <SheetHeader>
                   <SheetTitle>{currentNovel.title}</SheetTitle>
                 </SheetHeader>
-                <ChapterListComponent inSheet />
+                <EditorChapterList
+                  variant="sheet"
+                  showInlineCreateTrigger={false}
+                  chapters={currentNovel?.chapters ?? []}
+                  currentChapterId={currentChapter?.id}
+                  onSelectChapter={selectChapter}
+                  onDeleteChapter={handleDeleteChapter}
+                />
               </SheetContent>
             </Sheet>
           </div>
@@ -2807,7 +3070,9 @@ export default function NovelWriterApp() {
           <DialogHeader>
             <DialogTitle>章节历史版本</DialogTitle>
             <DialogDescription>
-              {currentChapter?.title} - 共 {chapterRevisions.length} 个历史版本
+              {currentChapter
+                ? `第${currentChapter.chapterNumber ?? currentChapter.order + 1}章 ${currentChapter.title} — 共 ${chapterRevisions.length} 个历史版本`
+                : `共 ${chapterRevisions.length} 个历史版本`}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 mt-4 max-h-[60vh] overflow-y-auto">

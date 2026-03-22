@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server'
+import { randomUUID } from 'crypto'
 import { callAliyunAIWithRetry } from '@/lib/aliyun-ai'
-import { db } from '@/lib/db'
-import { saveChapterContent, updateChapterInIndex, updateNovelMeta } from '@/lib/oss'
+import { saveChapterContent, updateChapterInIndex, getNovelMetaFromOSS } from '@/lib/oss'
+import { recomputeNovelWordCountFromOss } from '@/lib/novel-oss-helpers'
 import { z } from 'zod'
 
 // 请求验证
@@ -299,12 +300,10 @@ export async function POST(request: NextRequest) {
       let totalGeneratedWords = 0
       const generatedChapters: Array<{ id: string; title: string; wordCount: number }> = []
       
-      // 读取已有章节，用于跳过已存在的内容
-      const existingChapters = await db.chapter.findMany({
-        where: { novelId },
-        orderBy: { order: 'asc' }
-      })
-      const existingOrders = new Set(existingChapters.map(ch => ch.order))
+      // 读取 OSS 已有章节索引，用于跳过已存在 order
+      const ossMeta = await getNovelMetaFromOSS(novelId)
+      const existingChapters = [...(ossMeta?.chapters ?? [])].sort((a, b) => a.order - b.order)
+      const existingOrders = new Set(existingChapters.map((ch) => ch.order))
       
       // 如果所有章节都已存在，直接返回
       if (existingOrders.size >= chapterCount) {
@@ -313,7 +312,7 @@ export async function POST(request: NextRequest) {
           totalChapters: existingChapters.length,
           totalWords: existingChapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0),
           skipped: true,
-          chapters: existingChapters.map(ch => ({ id: ch.id, title: ch.title, wordCount: ch.wordCount }))
+          chapters: existingChapters.map((ch) => ({ id: ch.id, title: ch.title, wordCount: ch.wordCount }))
         })
         controller.close()
         return
@@ -386,20 +385,21 @@ export async function POST(request: NextRequest) {
             context.recentSummaries.push(summary)
             if (context.recentSummaries.length > 5) context.recentSummaries.shift()
             
-            const chapter = await db.chapter.create({
-              data: { novelId, title: plan.title, content, wordCount: content.length, order: plan.index }
-            })
-            
+            const chapterId = randomUUID()
             try {
-              await saveChapterContent(novelId, chapter.id, content)
-              await updateChapterInIndex(novelId, chapter.id, {
-                title: plan.title, wordCount: content.length, order: plan.index
+              await saveChapterContent(novelId, chapterId, content)
+              await updateChapterInIndex(novelId, chapterId, {
+                title: plan.title,
+                chapterNumber: plan.index + 1,
+                wordCount: content.length,
+                order: plan.index,
+                isPublished: false,
               })
             } catch (e) {
-              console.error('OSS同步失败:', e)
+              console.error('OSS 写入失败:', e)
             }
-            
-            generatedChapters.push({ id: chapter.id, title: plan.title, wordCount: content.length })
+
+            generatedChapters.push({ id: chapterId, title: plan.title, wordCount: content.length })
             totalGeneratedWords += content.length
             previousContent = content
             
@@ -420,10 +420,7 @@ export async function POST(request: NextRequest) {
           }
         }
         
-        const existingWordSum = existingChapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0)
-        const novelWordCount = existingWordSum + totalGeneratedWords
-        await db.novel.update({ where: { id: novelId }, data: { wordCount: novelWordCount } })
-        await updateNovelMeta(novelId, { wordCount: novelWordCount })
+        const novelWordCount = await recomputeNovelWordCountFromOss(novelId)
         
         sendEvent(controller, 'complete', {
           message: `生成完成！新生成 ${generatedChapters.length} 章，共 ${totalGeneratedWords} 字`,

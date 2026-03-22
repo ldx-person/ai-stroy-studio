@@ -35,14 +35,19 @@ export const updateNovelSchema = z.object({
 export const createChapterSchema = z.object({
   novelId: z.string().min(1, '小说ID不能为空'),
   title: z.string().trim().min(1, '标题不能为空').max(100, '标题最多100个字符'),
+  /** 第几章（≥1）；省略则自动为当前最大章号+1 */
+  chapterNumber: z.number().int().min(1).optional(),
   order: z.number().int().min(0).optional(),
   content: z.string().max(100000, '章节内容最多100000个字符').optional()
 })
 
-// Update chapter schema
+// Update chapter schema（novelId：OSS 真相源下用于定位对象键）
 export const updateChapterSchema = z.object({
   id: z.string().min(1, '章节ID不能为空'),
+  novelId: z.string().min(1, '小说ID不能为空'),
   title: z.string().trim().min(1, '标题不能为空').max(100, '标题最多100个字符').optional(),
+  /** 第几章（≥1），与标题正文分开存储 */
+  chapterNumber: z.number().int().min(1).optional(),
   content: z.string().max(100000, '章节内容最多100000个字符').optional(),
   wordCount: z.number().int().min(0).optional()
 })

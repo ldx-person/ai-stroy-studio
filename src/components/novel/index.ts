@@ -1,5 +1,6 @@
 export { TTSPlayer } from './TTSPlayer'
-export { ChapterList } from './ChapterList'
+export { EditorChapterList } from './ChapterList'
+export type { EditorChapterListItem, EditorChapterListProps } from './ChapterList'
 export { NovelCard } from './NovelCard'
 export { NovelCardSkeleton, NovelListSkeleton, ChapterListSkeleton, EditorSkeleton } from './skeletons'
 export { ErrorBoundary, ErrorDisplay } from './error-boundary'

@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import { randomUUID } from 'crypto'
 import {
   saveChapterContent,
   updateChapterInIndex,
-  updateNovelMeta,
   getChapterContent,
-  isOSSAvailable
+  isOSSAvailable,
+  getNovelFromOSS,
 } from '@/lib/oss'
+import { recomputeNovelWordCountFromOss } from '@/lib/novel-oss-helpers'
+import { sumWordCountsFromBodies } from '@/lib/word-count'
 import {
   generateStoryStructure,
   generateBatchOutlines,
@@ -14,31 +16,23 @@ import {
   generateChapterOpening,
   generateSummary,
   type StoryContext,
-  type ChapterPlan
+  type ChapterPlan,
 } from '@/lib/ai-chapter-gen'
 import { z } from 'zod'
+
+export const runtime = 'nodejs'
 
 const requestSchema = z.object({
   novelId: z.string().min(1),
   orders: z.array(z.number().int().min(0)),
-  generateMode: z.enum(['full', 'opening']).optional().default('full')
+  generateMode: z.enum(['full', 'opening']).optional().default('full'),
 })
-
-async function getChapterContentSafe(novelId: string, chapterId: string, dbContent: string): Promise<string> {
-  if (dbContent && dbContent.length > 0) return dbContent
-  if (isOSSAvailable()) {
-    try {
-      const ossContent = await getChapterContent(novelId, chapterId)
-      if (ossContent) return ossContent
-    } catch {
-      // ignore
-    }
-  }
-  return ''
-}
 
 export async function POST(request: NextRequest) {
   try {
+    if (!isOSSAvailable()) {
+      return NextResponse.json({ success: false, error: 'OSS 未配置' }, { status: 503 })
+    }
     const body = await request.json()
     const validation = requestSchema.safeParse(body)
     if (!validation.success) {
@@ -53,32 +47,49 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: '没有需要补全的章节' }, { status: 400 })
     }
 
-    const novel = await db.novel.findUnique({
-      where: { id: novelId },
-      select: { title: true, description: true, genre: true, wordCount: true }
-    })
-    if (!novel || !novel.description || novel.description.length < 20) {
+    const full = await getNovelFromOSS(novelId)
+    if (!full || !full.description || full.description.length < 20) {
       return NextResponse.json({ success: false, error: '小说不存在或简介不足' }, { status: 400 })
     }
 
-    const allChapters = await db.chapter.findMany({
-      where: { novelId },
-      orderBy: { order: 'asc' },
-      select: { id: true, title: true, content: true, wordCount: true, order: true }
-    })
+    const novel = full.meta
+    const allChapters = [...full.chapters].sort((a, b) => a.order - b.order)
+
+    const orderCounts = new Map<number, number>()
+    for (const c of allChapters) {
+      orderCounts.set(c.order, (orderCounts.get(c.order) ?? 0) + 1)
+    }
+    if ([...orderCounts.values()].some((n) => n > 1)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: '存在相同排序位（order）的多章，请先在「章节检测」中处理重复后再补全',
+        },
+        { status: 409 }
+      )
+    }
 
     const maxOrder = allChapters.length > 0 ? Math.max(...allChapters.map((c) => c.order)) : 0
     const totalChapters = Math.max(maxOrder + 1, ...orders, 1)
-    const totalWords = novel.wordCount || totalChapters * 1000
+    const fromBodies = sumWordCountsFromBodies(allChapters)
+    const totalWords =
+      fromBodies > 0 ? fromBodies : novel.wordCount || totalChapters * 1000
     const wordsPerChapter = Math.floor(totalWords / totalChapters)
 
-    const orderToChapter = new Map(allChapters.map((c) => [c.order, c]))
+    /** 同 order 只保留首次出现的章，避免重复 order 时 Map 被覆盖导致衔接上下文错误 */
+    const orderToChapter = new Map<number, (typeof allChapters)[0]>()
+    for (const c of allChapters) {
+      if (!orderToChapter.has(c.order)) {
+        orderToChapter.set(c.order, c)
+      }
+    }
+
     const context: StoryContext = { characters: [], recentSummaries: [] }
     let previousContent = ''
 
     const structure = await generateStoryStructure(
       novel.title,
-      novel.description,
+      full.description,
       novel.genre,
       totalWords,
       totalChapters
@@ -98,14 +109,13 @@ export async function POST(request: NextRequest) {
         context
       )
 
-      if (!plans || plans.length === 0) {
-        continue
-      }
+      if (!plans || plans.length === 0) continue
       const plan = plans[0] as ChapterPlan
 
       const prevChapter = order > 0 ? orderToChapter.get(order - 1) : null
       if (prevChapter) {
-        previousContent = await getChapterContentSafe(novelId, prevChapter.id, prevChapter.content || '')
+        const c = prevChapter.content || (await getChapterContent(novelId, prevChapter.id))
+        previousContent = c
       }
 
       const content =
@@ -124,54 +134,38 @@ export async function POST(request: NextRequest) {
       context.recentSummaries.push(summary)
       if (context.recentSummaries.length > 5) context.recentSummaries.shift()
 
-      const chapter = await db.chapter.create({
-        data: {
-          novelId,
-          title: plan.title,
-          content,
-          wordCount: content.length,
-          order
-        }
+      const chapterId = randomUUID()
+      await saveChapterContent(novelId, chapterId, content)
+      await updateChapterInIndex(novelId, chapterId, {
+        title: plan.title,
+        chapterNumber: order + 1,
+        wordCount: content.length,
+        order,
+        isPublished: false,
       })
 
-      if (isOSSAvailable()) {
-        try {
-          await saveChapterContent(novelId, chapter.id, content)
-          await updateChapterInIndex(novelId, chapter.id, {
-            title: plan.title,
-            wordCount: content.length,
-            order
-          })
-        } catch (e) {
-          console.error('OSS sync failed:', e)
-        }
+      const synthetic = {
+        id: chapterId,
+        title: plan.title,
+        content,
+        wordCount: content.length,
+        order,
+        isPublished: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       }
-
-      orderToChapter.set(order, { ...chapter, content, wordCount: content.length })
+      orderToChapter.set(order, synthetic as (typeof allChapters)[0])
       previousContent = content
-      created.push({ id: chapter.id, title: plan.title, order, wordCount: content.length })
+      created.push({ id: chapterId, title: plan.title, order, wordCount: content.length })
     }
 
     const totalGeneratedWords = created.reduce((s, c) => s + c.wordCount, 0)
-    const currentTotal = allChapters.reduce((s, c) => s + (c.wordCount || 0), 0)
-    const newTotal = currentTotal + totalGeneratedWords
-
-    await db.novel.update({
-      where: { id: novelId },
-      data: { wordCount: newTotal }
-    })
-    if (isOSSAvailable()) {
-      try {
-        await updateNovelMeta(novelId, { wordCount: newTotal })
-      } catch {
-        // ignore
-      }
-    }
+    await recomputeNovelWordCountFromOss(novelId)
 
     return NextResponse.json({
       success: true,
       created,
-      totalWords: totalGeneratedWords
+      totalWords: totalGeneratedWords,
     })
   } catch (error) {
     console.error('Fill gaps error:', error)

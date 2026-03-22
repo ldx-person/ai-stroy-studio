@@ -19,6 +19,7 @@ interface Novel {
 interface Chapter {
   id: string
   novelId: string
+  chapterNumber: number
   title: string
   content: string
   wordCount: number
@@ -148,11 +149,21 @@ export function useUpdateChapter() {
   const queryClient = useQueryClient()
   
   return useMutation({
-    mutationFn: async ({ id, title, content }: { id: string; title?: string; content?: string }) => {
+    mutationFn: async ({
+      id,
+      novelId,
+      title,
+      content,
+    }: {
+      id: string
+      novelId: string
+      title?: string
+      content?: string
+    }) => {
       const res = await fetch('/api/chapters', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, title, content }),
+        body: JSON.stringify({ id, novelId, title, content }),
       })
       const data = await res.json()
       if (!data.success) throw new Error(data.error)
@@ -169,8 +180,11 @@ export function useDeleteChapter() {
   const queryClient = useQueryClient()
   
   return useMutation({
-    mutationFn: async (id: string) => {
-      const res = await fetch(`/api/chapters?id=${id}`, { method: 'DELETE' })
+    mutationFn: async ({ id, novelId }: { id: string; novelId: string }) => {
+      const res = await fetch(
+        `/api/chapters?id=${encodeURIComponent(id)}&novelId=${encodeURIComponent(novelId)}`,
+        { method: 'DELETE' }
+      )
       const data = await res.json()
       if (!data.success) throw new Error(data.error)
     },

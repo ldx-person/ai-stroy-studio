@@ -152,23 +152,34 @@ export async function POST(request: NextRequest) {
 
     const { novelId, action, input, options } = parsed.data
 
-    // 自动注入作品档案（Story Bible），用于减少长篇漂移
+    // 自动注入作品档案（Story Bible），用于减少长篇漂移（起标题不需要且 run 会 skipStoryBible，直接跳过 OSS 可避免多余请求）
     let storyBibleText = ''
-    if (novelId && isOSSAvailable()) {
-      const storyBible = await getStoryBibleFromOSS(novelId)
-      if (storyBible) {
-        storyBibleText = `\n\n【作品档案（必须遵守）】\n${JSON.stringify(storyBible)}`
+    if (action !== 'title' && novelId && isOSSAvailable()) {
+      try {
+        const storyBible = await getStoryBibleFromOSS(novelId)
+        if (storyBible) {
+          storyBibleText = `\n\n【作品档案（必须遵守）】\n${JSON.stringify(storyBible)}`
+        }
+      } catch (e) {
+        console.warn('[ai/action] Story Bible 读取失败，已忽略:', e)
       }
     }
 
     const variants = options.variants
     const candidates: Array<{ text: string }> = []
 
-    const run = async (messages: ChatMessage[], temp: number) => {
-      if (storyBibleText && messages[0]?.role === 'system') {
+    const run = async (
+      messages: ChatMessage[],
+      temp: number,
+      opts?: { skipStoryBible?: boolean; maxTokens?: number }
+    ) => {
+      if (storyBibleText && messages[0]?.role === 'system' && !opts?.skipStoryBible) {
         messages = [{ ...messages[0], content: messages[0].content + storyBibleText }, ...messages.slice(1)]
       }
-      const text = await callAliyunAIWithRetry(messages, 3, 2000, { temperature: temp })
+      const text = await callAliyunAIWithRetry(messages, 3, 2000, {
+        temperature: temp,
+        maxTokens: opts?.maxTokens ?? 4096,
+      })
       const cleaned = (text || '').trim()
       if (cleaned) candidates.push({ text: cleaned })
     }
@@ -196,13 +207,16 @@ export async function POST(request: NextRequest) {
       }
     } else if (action === 'title') {
       const { system, userPrefix } = buildTitlePrompt()
-      const head = input.text.slice(0, 600)
+      const head = input.text.trim().slice(0, 2000)
       const makeMessages = (): ChatMessage[] => [
         { role: 'system', content: system },
-        { role: 'user', content: `${userPrefix}\n${head}\n\n请生成标题：` },
+        {
+          role: 'user',
+          content: `${userPrefix}\n${head}\n\n请只输出一个章节标题（不要引号、不要解释）：`,
+        },
       ]
-      // title 一般只要 1 个
-      await run(makeMessages(), 0.6)
+      // 起标题与作品档案无关；注入 Story Bible 易占满上下文导致失败，故跳过
+      await run(makeMessages(), 0.6, { skipStoryBible: true, maxTokens: 256 })
     } else if (action === 'opening') {
       const { system, userPrefix } = buildOpeningPrompt(options.style, options.length)
       const makeMessages = (): ChatMessage[] => [
