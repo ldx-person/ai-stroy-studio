@@ -141,3 +141,22 @@ export function normalizeChapterIndexEntries<T extends ChapterIndexEntry>(chapte
     } as T
   })
 }
+
+/**
+ * 阅读顺序：优先按「第 N 章」章号，其次 order（与章节目录侧栏一致）
+ */
+export function compareChaptersReadingOrder(
+  a: { order?: number; chapterNumber?: number },
+  b: { order?: number; chapterNumber?: number }
+): number {
+  const na =
+    typeof a.chapterNumber === 'number' && a.chapterNumber >= 1
+      ? a.chapterNumber
+      : (a.order ?? 0) + 1
+  const nb =
+    typeof b.chapterNumber === 'number' && b.chapterNumber >= 1
+      ? b.chapterNumber
+      : (b.order ?? 0) + 1
+  if (na !== nb) return na - nb
+  return (a.order ?? 0) - (b.order ?? 0)
+}

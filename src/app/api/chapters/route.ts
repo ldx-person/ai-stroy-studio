@@ -53,7 +53,9 @@ export async function POST(request: NextRequest) {
     const maxNum = norm.reduce((m, c) => Math.max(m, c.chapterNumber ?? 0), 0)
     const nextChapterNumber =
       reqChapterNumber != null && reqChapterNumber >= 1 ? reqChapterNumber : maxNum + 1
-    const nextOrder = order ?? norm.length
+    // 应用 max(order)+1，避免与智能生成已占用的 order 槽位冲突（norm.length 在跳号时会重复 order）
+    const maxOrder = norm.reduce((m, c) => Math.max(m, c.order ?? -1), -1)
+    const nextOrder = order ?? maxOrder + 1
     const now = new Date().toISOString()
 
     await saveChapterContent(novelId, chapterId, chapterContent)

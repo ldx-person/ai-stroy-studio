@@ -53,6 +53,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { TTSPlayer, EditorChapterList, NovelCard, StoryBibleEditor, ExportDialog } from '@/components/novel'
+import { compareChaptersReadingOrder } from '@/lib/chapter-meta'
 
 // Types
 interface Novel {
@@ -488,7 +489,7 @@ export default function NovelWriterApp() {
       if (data.success) {
         setCurrentNovel(data.novel)
         // 详情 API 只返回章节目录（无正文），避免数百章巨型 JSON；当前章正文单独 GET /api/chapters
-        const sorted = [...data.novel.chapters].sort((a: Chapter, b: Chapter) => a.order - b.order)
+        const sorted = [...data.novel.chapters].sort(compareChaptersReadingOrder)
         if (sorted.length > 0) {
           const first = sorted[0]
           try {
@@ -574,7 +575,7 @@ export default function NovelWriterApp() {
         
         if (currentChapter?.id === chapterId) {
           if (updatedChapters.length > 0) {
-            void selectChapter(updatedChapters.sort((a, b) => a.order - b.order)[0])
+            void selectChapter(updatedChapters.sort(compareChaptersReadingOrder)[0])
           } else {
             setCurrentChapter(null)
             setEditingContent('')
@@ -868,7 +869,7 @@ export default function NovelWriterApp() {
   const navigateChapter = (direction: 'prev' | 'next') => {
     if (!currentNovel || !currentChapter) return
     
-    const sortedChapters = [...currentNovel.chapters].sort((a, b) => a.order - b.order)
+    const sortedChapters = [...currentNovel.chapters].sort(compareChaptersReadingOrder)
     const currentIndex = sortedChapters.findIndex(ch => ch.id === currentChapter.id)
     
     if (direction === 'prev' && currentIndex > 0) {
@@ -1424,6 +1425,24 @@ export default function NovelWriterApp() {
                     message: `已完成 ${data.index + 1}/${prev.total} 章`
                   }))
                   break
+
+                case 'chapter_error':
+                  toast({
+                    title: `第 ${(data.index ?? 0) + 1} 章保存失败`,
+                    description: typeof data.error === 'string' ? data.error : '请检查 OSS 或稍后重试',
+                    variant: 'destructive',
+                  })
+                  break
+
+                case 'chapter_retry':
+                  setGenerationProgress((prev) => ({
+                    ...prev,
+                    message:
+                      typeof data.message === 'string'
+                        ? data.message
+                        : `第 ${(data.index ?? 0) + 1} 章失败，正在重试…`,
+                  }))
+                  break
                   
                 case 'complete':
                   toast({ title: data.message })
@@ -1438,7 +1457,19 @@ export default function NovelWriterApp() {
                   break
                   
                 case 'error':
-                  toast({ title: data.error, variant: 'destructive' })
+                  toast({
+                    title: typeof data.error === 'string' ? data.error : '生成失败',
+                    variant: 'destructive',
+                  })
+                  {
+                    const novelsResErr = await fetch('/api/novels')
+                    const novelsDataErr = await novelsResErr.json()
+                    if (novelsDataErr.success) {
+                      setNovels(novelsDataErr.novels)
+                    }
+                  }
+                  setShowSmartGenerate(false)
+                  setSmartGenNovel(null)
                   break
               }
             } catch (e) {
@@ -1589,7 +1620,7 @@ export default function NovelWriterApp() {
           if (updated) {
             setCurrentNovel(updated)
             if (deletedCurrentId) {
-              const remaining = [...updated.chapters].sort((a, b) => a.order - b.order)
+              const remaining = [...updated.chapters].sort(compareChaptersReadingOrder)
               if (remaining.length > 0) {
                 await selectChapter(remaining[0])
               } else {
@@ -2487,7 +2518,7 @@ export default function NovelWriterApp() {
                           size="icon"
                           className="h-9 w-9 touch-manipulation"
                           onClick={() => navigateChapter('prev')}
-                          disabled={currentNovel.chapters.sort((a, b) => a.order - b.order).findIndex(ch => ch.id === currentChapter.id) === 0}
+                          disabled={[...currentNovel.chapters].sort(compareChaptersReadingOrder).findIndex(ch => ch.id === currentChapter.id) === 0}
                         >
                           <ChevronLeft className="w-5 h-5" />
                         </Button>
@@ -2496,7 +2527,7 @@ export default function NovelWriterApp() {
                           size="icon"
                           className="h-9 w-9 touch-manipulation"
                           onClick={() => navigateChapter('next')}
-                          disabled={currentNovel.chapters.sort((a, b) => a.order - b.order).findIndex(ch => ch.id === currentChapter.id) === currentNovel.chapters.length - 1}
+                          disabled={[...currentNovel.chapters].sort(compareChaptersReadingOrder).findIndex(ch => ch.id === currentChapter.id) === currentNovel.chapters.length - 1}
                         >
                           <ChevronRight className="w-5 h-5" />
                         </Button>
@@ -2913,7 +2944,7 @@ export default function NovelWriterApp() {
                         variant="outline" 
                         size="sm"
                         onClick={() => navigateChapter('prev')}
-                        disabled={currentNovel.chapters.sort((a, b) => a.order - b.order).findIndex(ch => ch.id === currentChapter.id) === 0}
+                        disabled={[...currentNovel.chapters].sort(compareChaptersReadingOrder).findIndex(ch => ch.id === currentChapter.id) === 0}
                       >
                         <ChevronLeft className="w-4 h-4 mr-1" />
                         上一章
@@ -2922,7 +2953,7 @@ export default function NovelWriterApp() {
                         variant="outline" 
                         size="sm"
                         onClick={() => navigateChapter('next')}
-                        disabled={currentNovel.chapters.sort((a, b) => a.order - b.order).findIndex(ch => ch.id === currentChapter.id) === currentNovel.chapters.length - 1}
+                        disabled={[...currentNovel.chapters].sort(compareChaptersReadingOrder).findIndex(ch => ch.id === currentChapter.id) === currentNovel.chapters.length - 1}
                       >
                         下一章
                         <ChevronRight className="w-4 h-4 ml-1" />

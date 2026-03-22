@@ -1,6 +1,7 @@
 'use client'
 
 import { memo } from 'react'
+import { compareChaptersReadingOrder } from '@/lib/chapter-meta'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { DialogTrigger } from '@/components/ui/dialog'
@@ -46,9 +47,7 @@ function EditorChapterListInner({
   hideHeaderRow = false,
   showInlineCreateTrigger = true,
 }: EditorChapterListProps) {
-  const sortedChapters = [...chapters].sort(
-    (a, b) => (a.order ?? 0) - (b.order ?? 0)
-  )
+  const sortedChapters = [...chapters].sort(compareChaptersReadingOrder)
 
   const rows = sortedChapters.map((chapter) => (
     <div

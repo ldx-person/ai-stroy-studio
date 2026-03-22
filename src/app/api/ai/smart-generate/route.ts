@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { callAliyunAIWithRetry } from '@/lib/aliyun-ai'
 import { randomUUID } from 'crypto'
+import {
+  ensureChapterPlansCoverRange,
+  getPhaseForChapterIndex,
+  groupConsecutiveIntegers,
+  missingChapterOrderSlots,
+} from '@/lib/ai-chapter-batch'
 import { getNovelMetaFromOSS, getChapterContent, saveChapterContent, updateChapterInIndex } from '@/lib/oss'
 import { recomputeNovelWordCountFromOss } from '@/lib/novel-oss-helpers'
 import { z } from 'zod'
@@ -17,6 +23,9 @@ const requestSchema = z.object({
 
 // 生成批次大小（一次生成少量章节，避免请求过长）
 const BATCH_SIZE = 3
+/** 单章（AI + OSS）失败时的重试次数，用尽仍失败则终止本次请求并返回错误 */
+const CHAPTER_MAX_ATTEMPTS = 4
+const CHAPTER_RETRY_DELAY_MS = 2500
 // 智能章节生成功能这里的目标是「给出每章的开头」，而不是整章全文
 // 因此只需要一个相对较短的篇幅
 const OPENING_WORDS_PER_CHAPTER = 100
@@ -184,7 +193,9 @@ ${phaseHint}${contextText}${charactersText}
 2. 大纲要具体有细节，不要太笼统
 3. 章节之间要有连贯性，承上启下
 4. 要有情节推进和冲突发展
-5. 只输出JSON`
+5. 只输出JSON
+
+重要：chapters 数组必须恰好 ${actualBatchSize} 个对象，依次对应第 ${startIndex + 1} 章到第 ${endIndex} 章，不要遗漏、不要合并、不要多写。`
 
   const content = await callAliyunAIWithRetry([
     { role: 'user', content: prompt }
@@ -196,20 +207,14 @@ ${phaseHint}${contextText}${charactersText}
   if (jsonStr.endsWith('```')) jsonStr = jsonStr.slice(0, -3)
   
   const data = JSON.parse(jsonStr.trim())
-  
-  // 确定每章的阶段
-  const getPhase = (index: number): 'beginning' | 'middle' | 'ending' => {
-    if (index < beginningEnd) return 'beginning'
-    if (index < middleEnd) return 'middle'
-    return 'ending'
-  }
-  
-  return data.chapters.map((ch: { title: string; outline: string; keyEvents?: string[] }, i: number) => ({
+
+  const rawList = Array.isArray(data.chapters) ? data.chapters : []
+  return rawList.map((ch: { title: string; outline: string; keyEvents?: string[] }, i: number) => ({
     index: startIndex + i,
-    phase: getPhase(startIndex + i),
-    title: ch.title,
-    outline: ch.outline,
-    estimatedWords: wordsPerChapter
+    phase: getPhaseForChapterIndex(startIndex + i, totalChapters),
+    title: typeof ch.title === 'string' ? ch.title : `第${startIndex + i + 1}章`,
+    outline: typeof ch.outline === 'string' ? ch.outline : '请根据全书结构推进情节。',
+    estimatedWords: wordsPerChapter,
   }))
 }
 
@@ -336,18 +341,17 @@ export async function POST(request: NextRequest) {
     
     const ossMeta = await getNovelMetaFromOSS(novelId)
     const existingChapters = [...(ossMeta?.chapters ?? [])].sort((a, b) => a.order - b.order)
-    const existingCount = existingChapters.length
+    const existingOrders = new Set(existingChapters.map((ch) => ch.order))
+    const missingSlots = missingChapterOrderSlots(existingOrders, chapterCount)
 
-    let previousContent = ''
-    if (existingCount > 0) {
-      const last = existingChapters[existingCount - 1]
-      previousContent = await getChapterContent(novelId, last.id)
-    }
+    /** 随写随增，用于下一批衔接 order-1 的正文 */
+    let chaptersIndex = [...existingChapters]
 
     const context: StoryContext = {
       summary: description,
       characters: [],
-      currentPlot: existingCount > 0 ? existingChapters[existingCount - 1].title : '',
+      currentPlot:
+        chaptersIndex.length > 0 ? chaptersIndex[chaptersIndex.length - 1]!.title : '',
       recentSummaries: [],
     }
 
@@ -360,106 +364,166 @@ export async function POST(request: NextRequest) {
     }> = []
 
     let totalGeneratedWords = existingChapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0)
-    
-    // Step 1: 生成故事结构
-    console.log('生成故事结构...')
-    const structure = await generateStoryStructure(title, description, genreNormalized, totalWords, chapterCount)
-    
-    // Step 2: 分批生成章节
-    const startIndex = existingCount
-    if (startIndex >= chapterCount) {
+
+    if (missingSlots.length === 0) {
       return NextResponse.json({
         success: true,
-        message: '已有章节数量已达到或超过目标章节数，未生成新的章节开头',
-        totalChapters: existingCount,
+        message: `全书 ${chapterCount} 个章节槽位（0～${chapterCount - 1}）均已存在，未生成新章节开头`,
+        totalChapters: existingChapters.length,
         totalWords: totalGeneratedWords,
         chapters: existingChapters.map((ch) => ({
           index: ch.order,
           title: ch.title,
           wordCount: ch.wordCount,
-        }))
+        })),
       })
     }
-    
-    const remainingChapters = chapterCount - startIndex
-    const batches = Math.ceil(remainingChapters / BATCH_SIZE)
-    
-    for (let batch = 0; batch < batches; batch++) {
-      const batchStartIndex = startIndex + batch * BATCH_SIZE
-      const batchSize = Math.min(BATCH_SIZE, chapterCount - batchStartIndex)
-      
-      console.log(`生成第 ${batch + 1}/${batches} 批章节大纲 (${batchStartIndex + 1}-${batchStartIndex + batchSize})...`)
-      
-      // 生成这批章节的大纲
-      const chapterPlans = await generateBatchOutlines(
-        title, description, genreNormalized, structure,
-        batchStartIndex, batchSize, chapterCount, wordsPerChapter, context
-      )
-      
-      // 逐章生成内容
-      for (const plan of chapterPlans) {
-        console.log(`生成第 ${plan.index + 1} 章: ${plan.title}`)
-        
-        // 生成章节内容
-        const content = await generateChapterContent(
-          title, genreNormalized, plan, context, previousContent
-        )
-        
-        // 生成章节摘要
-        const summary = await generateChapterSummary(title, plan.title, content)
-        
-        // 提取角色
-        context.characters = await extractCharacters(content, context.characters)
-        
-        // 更新上下文
-        context.recentSummaries.push(summary)
-        if (context.recentSummaries.length > 5) {
-          context.recentSummaries.shift()
-        }
-        context.currentPlot = summary
-        
-        // 保存结果
-        results.push({
-          index: plan.index,
-          title: plan.title,
-          content,
-          wordCount: content.length,
-          summary
-        })
-        
-        totalGeneratedWords += content.length
-        previousContent = content
-        
-        // 批次间延迟
-        await new Promise(resolve => setTimeout(resolve, 1000))
-      }
-      
-      // 批次间更长延迟
-      if (batch < batches - 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000))
+
+    // Step 1: 生成故事结构
+    console.log('生成故事结构...')
+    const structure = await generateStoryStructure(
+      title,
+      description,
+      genreNormalized,
+      totalWords,
+      chapterCount
+    )
+
+    // Step 2: 按「缺失槽位」分批：先合并连续区间，再按 BATCH_SIZE 切段，避免单次大纲过长
+    const runs = groupConsecutiveIntegers(missingSlots)
+    const groups: number[][] = []
+    for (const run of runs) {
+      for (let i = 0; i < run.length; i += BATCH_SIZE) {
+        groups.push(run.slice(i, i + BATCH_SIZE))
       }
     }
-    
-    // Step 3: 只为缺失的章节追加「章节开头」，不覆盖已有章节
-    console.log('保存章节开头到数据库...')
-    
-    for (const result of results) {
-      // 如果该 index 已经有章节，则跳过（不覆盖）
-      const exists = existingChapters.find(ch => ch.order === result.index)
-      if (exists) continue
+    let batchNo = 0
 
-      const chapterId = randomUUID()
-      try {
-        await saveChapterContent(novelId, chapterId, result.content)
-        await updateChapterInIndex(novelId, chapterId, {
-          title: result.title,
-          chapterNumber: result.index + 1,
-          wordCount: result.wordCount,
-          order: result.index,
-          isPublished: false,
-        })
-      } catch (ossError) {
-        console.error('OSS 写入失败:', ossError)
+    for (const group of groups) {
+      batchNo++
+      const batchStartIndex = group[0]!
+      const batchSize = group.length
+      const batchEnd = batchStartIndex + batchSize
+
+      console.log(
+        `生成第 ${batchNo}/${groups.length} 批（槽位 ${batchStartIndex + 1}-${batchEnd}，共 ${batchSize} 章）...`
+      )
+
+      const rawPlans = await generateBatchOutlines(
+        title,
+        description,
+        genreNormalized,
+        structure,
+        batchStartIndex,
+        batchSize,
+        chapterCount,
+        wordsPerChapter,
+        context
+      )
+      const chapterPlans = ensureChapterPlansCoverRange(
+        rawPlans,
+        batchStartIndex,
+        batchEnd,
+        chapterCount,
+        wordsPerChapter
+      )
+
+      let previousContent = ''
+      if (batchStartIndex > 0) {
+        const prev = chaptersIndex.find((ch) => ch.order === batchStartIndex - 1)
+        if (prev) {
+          previousContent = await getChapterContent(novelId, prev.id)
+        }
+      }
+
+      for (const plan of chapterPlans) {
+        console.log(`生成第 ${plan.index + 1} 章: ${plan.title}`)
+
+        const chapterId = randomUUID()
+        let saved = false
+        let lastErr = ''
+
+        for (let attempt = 1; attempt <= CHAPTER_MAX_ATTEMPTS; attempt++) {
+          try {
+            if (attempt > 1) {
+              console.log(
+                `第 ${plan.index + 1} 章重试 ${attempt}/${CHAPTER_MAX_ATTEMPTS}，上次错误: ${lastErr}`
+              )
+              await new Promise((r) => setTimeout(r, CHAPTER_RETRY_DELAY_MS))
+            }
+
+            const content = await generateChapterContent(
+              title,
+              genreNormalized,
+              plan,
+              context,
+              previousContent
+            )
+
+            const summary = await generateChapterSummary(title, plan.title, content)
+
+            const now = new Date().toISOString()
+            await saveChapterContent(novelId, chapterId, content)
+            await updateChapterInIndex(novelId, chapterId, {
+              title: plan.title,
+              chapterNumber: plan.index + 1,
+              wordCount: content.length,
+              order: plan.index,
+              isPublished: false,
+            })
+
+            context.characters = await extractCharacters(content, context.characters)
+
+            context.recentSummaries.push(summary)
+            if (context.recentSummaries.length > 5) {
+              context.recentSummaries.shift()
+            }
+            context.currentPlot = summary
+            previousContent = content
+
+            existingOrders.add(plan.index)
+            chaptersIndex.push({
+              id: chapterId,
+              order: plan.index,
+              title: plan.title,
+              wordCount: content.length,
+              isPublished: false,
+              createdAt: now,
+              updatedAt: now,
+            })
+            results.push({
+              index: plan.index,
+              title: plan.title,
+              content,
+              wordCount: content.length,
+              summary,
+            })
+            saved = true
+            break
+          } catch (e) {
+            lastErr = e instanceof Error ? e.message : String(e)
+            console.error(
+              `第 ${plan.index + 1} 章失败 (尝试 ${attempt}/${CHAPTER_MAX_ATTEMPTS}):`,
+              e
+            )
+          }
+        }
+
+        if (!saved) {
+          return NextResponse.json(
+            {
+              success: false,
+              error: `第 ${plan.index + 1} 章在 ${CHAPTER_MAX_ATTEMPTS} 次尝试后仍失败：${lastErr}。已终止生成。`,
+            },
+            { status: 500 }
+          )
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+      }
+
+      if (batchNo < groups.length) {
+        await new Promise((resolve) => setTimeout(resolve, 2000))
       }
     }
 
