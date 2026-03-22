@@ -66,6 +66,30 @@ export interface OSSChapterMeta {
   updatedAt: string
 }
 
+/**
+ * chapters.json 串行写入：避免「读-合并-写」并发时后写覆盖先写，导致整书只剩最后一次合并的少量章节
+ * （智能流式生成 + 自动保存/多标签页同时改同一本书时高发）
+ */
+const chapterIndexWriteChain = new Map<string, Promise<unknown>>()
+
+async function replaceChaptersJsonUnsafe(
+  novelId: string,
+  chapters: OSSChapterMeta[]
+): Promise<void> {
+  const client = getOSSClient()
+  await client.put(
+    `${NOVEL_PREFIX}/${novelId}/chapters.json`,
+    Buffer.from(JSON.stringify(chapters, null, 2), 'utf-8')
+  )
+}
+
+function runChapterIndexMutation<T>(novelId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = chapterIndexWriteChain.get(novelId) ?? Promise.resolve()
+  const next = prev.catch(() => {}).then(fn) as Promise<T>
+  chapterIndexWriteChain.set(novelId, next.then(() => {}, () => {}))
+  return next
+}
+
 export interface OSSCharacterMeta {
   id: string
   name: string
@@ -193,22 +217,19 @@ export async function saveNovelToOSS(
     )
   }
   
-  // 5. 保存章节索引和内容
+  // 5. 保存章节索引和内容（与 updateChapterInIndex 等串行，避免覆盖并发写入）
   if (data.chapters && data.chapters.length > 0) {
-    await client.put(
-      `${NOVEL_PREFIX}/${novelId}/chapters.json`,
-      Buffer.from(JSON.stringify(chaptersIndex, null, 2), 'utf-8')
-    )
-    
-    // 保存每个章节的内容
-    for (const chapter of data.chapters) {
-      if (chapter.content) {
-        await client.put(
-          `${NOVEL_PREFIX}/${novelId}/chapters/${chapter.id}.txt`,
-          Buffer.from(chapter.content, 'utf-8')
-        )
+    await runChapterIndexMutation(novelId, async () => {
+      await replaceChaptersJsonUnsafe(novelId, chaptersIndex)
+      for (const chapter of data.chapters!) {
+        if (chapter.content) {
+          await client.put(
+            `${NOVEL_PREFIX}/${novelId}/chapters/${chapter.id}.txt`,
+            Buffer.from(chapter.content, 'utf-8')
+          )
+        }
       }
-    }
+    })
   }
 }
 
@@ -657,41 +678,214 @@ export async function reconcileChapterWordCountsWithFiles(novelId: string): Prom
   entriesUpdated: number
   totalWordCount: number
 }> {
+  return runChapterIndexMutation(novelId, async () => {
+    const client = getOSSClient()
+    const prefix = `${NOVEL_PREFIX}/${novelId}/`
+
+    let chapters: OSSChapterMeta[] = []
+    try {
+      const result = await client.get(`${prefix}chapters.json`)
+      chapters = parseChaptersIndexFromOssBody(result.content)
+    } catch {
+      return { chaptersChecked: 0, entriesUpdated: 0, totalWordCount: 0 }
+    }
+
+    let entriesUpdated = 0
+    const next: OSSChapterMeta[] = await Promise.all(
+      chapters.map(async (ch) => {
+        if (!ch?.id) return ch
+        let len = 0
+        try {
+          const r = await client.get(`${prefix}chapters/${ch.id}.txt`)
+          len = countWordsFromText(r.content.toString('utf-8'))
+        } catch {
+          len = 0
+        }
+        const prev = typeof ch.wordCount === 'number' ? ch.wordCount : 0
+        if (len !== prev) entriesUpdated++
+        return { ...ch, wordCount: len }
+      })
+    )
+
+    next.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    await replaceChaptersJsonUnsafe(novelId, next)
+
+    const totalWordCount = next.reduce(
+      (s, ch) => s + (typeof ch.wordCount === 'number' ? ch.wordCount : 0),
+      0
+    )
+    await updateNovelMeta(novelId, { wordCount: totalWordCount })
+
+    return { chaptersChecked: next.length, entriesUpdated, totalWordCount }
+  })
+}
+
+function guessChapterTitleFromPlainText(content: string, orderIndex: number): string {
+  const line = content.split(/\r?\n/).find((l) => l.trim().length > 0)
+  if (line && line.trim().length >= 2 && line.trim().length <= 80) {
+    return line.trim().replace(/^#+\s*/, '').slice(0, 80)
+  }
+  return `第${orderIndex + 1}章`
+}
+
+export type RebuildChapterIndexFromTxtResult = {
+  ok: boolean
+  error?: string
+  chapterCount: number
+  totalWordCount: number
+  /** dryRun 时返回前几条预览 */
+  preview?: OSSChapterMeta[]
+}
+
+/**
+ * 根据 OSS 上 `novels/{novelId}/chapters/*.txt` **全量重建** chapters.json，并同步 novel.json 总字数。
+ * - 顺序：尽量保留旧索引中仍存在的 id 的 order；其余 .txt（旧索引没有的 id）按 id 字典序接在后面。
+ * - 标题：旧索引有非占位标题则保留，否则用正文首行推断。
+ * - 索引里有但无对应 .txt 的条目会被移除（以正文文件为准）。
+ * 与 {@link repairChapterSequenceToMatchReadingOrder} 不同：后者只重排已有索引，不扫盘列 .txt。
+ */
+export async function rebuildChapterIndexFromOssTxtFiles(
+  novelId: string,
+  options?: { dryRun?: boolean }
+): Promise<RebuildChapterIndexFromTxtResult> {
   const client = getOSSClient()
   const prefix = `${NOVEL_PREFIX}/${novelId}/`
+  const now = new Date().toISOString()
 
-  let chapters: OSSChapterMeta[] = []
+  let novelCreatedAt = now
   try {
-    const result = await client.get(`${prefix}chapters.json`)
-    chapters = parseChaptersIndexFromOssBody(result.content)
+    const metaResult = await client.get(`${prefix}novel.json`)
+    const nm = JSON.parse(metaResult.content.toString('utf-8')) as { createdAt?: string }
+    if (typeof nm?.createdAt === 'string') novelCreatedAt = nm.createdAt
   } catch {
-    return { chaptersChecked: 0, entriesUpdated: 0, totalWordCount: 0 }
+    return {
+      ok: false,
+      error: '无法读取 novel.json，请先确保小说元数据存在',
+      chapterCount: 0,
+      totalWordCount: 0,
+    }
   }
 
-  let entriesUpdated = 0
-  const next: OSSChapterMeta[] = await Promise.all(
-    chapters.map(async (ch) => {
-      if (!ch?.id) return ch
-      let len = 0
-      try {
-        const r = await client.get(`${prefix}chapters/${ch.id}.txt`)
-        len = countWordsFromText(r.content.toString('utf-8'))
-      } catch {
-        len = 0
-      }
-      const prev = typeof ch.wordCount === 'number' ? ch.wordCount : 0
-      if (len !== prev) entriesUpdated++
-      return { ...ch, wordCount: len }
-    })
-  )
+  const chapterPrefix = `${prefix}chapters/`
+  let objects: Array<{ name: string }>
+  try {
+    objects = await listAllObjects(client, chapterPrefix)
+  } catch (e) {
+    return {
+      ok: false,
+      error: `列出 chapters/ 失败: ${e instanceof Error ? e.message : String(e)}`,
+      chapterCount: 0,
+      totalWordCount: 0,
+    }
+  }
 
-  next.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-  await client.put(`${prefix}chapters.json`, Buffer.from(JSON.stringify(next, null, 2), 'utf-8'))
+  const txtIds: string[] = []
+  const seenTxt = new Set<string>()
+  for (const o of objects) {
+    if (!o.name.endsWith('.txt')) continue
+    const rel = o.name.slice(chapterPrefix.length)
+    if (!rel) continue
+    const id = rel.replace(/\.txt$/i, '')
+    if (id && !seenTxt.has(id)) {
+      seenTxt.add(id)
+      txtIds.push(id)
+    }
+  }
 
-  const totalWordCount = next.reduce((s, ch) => s + (typeof ch.wordCount === 'number' ? ch.wordCount : 0), 0)
-  await updateNovelMeta(novelId, { wordCount: totalWordCount })
+  if (txtIds.length === 0) {
+    return {
+      ok: false,
+      error: '该目录下没有 chapters/*.txt，无法重建索引',
+      chapterCount: 0,
+      totalWordCount: 0,
+    }
+  }
 
-  return { chaptersChecked: next.length, entriesUpdated, totalWordCount }
+  let oldChapters: OSSChapterMeta[] = []
+  try {
+    const buf = await client.get(`${prefix}chapters.json`)
+    oldChapters = parseChaptersIndexFromOssBody(buf.content)
+    oldChapters.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  } catch {
+    /* 无索引或损坏 */
+  }
+
+  const txtSet = new Set(txtIds)
+  const oldById = new Map<string, OSSChapterMeta>()
+  for (const ch of oldChapters) {
+    if (ch.id && !oldById.has(ch.id)) oldById.set(ch.id, ch)
+  }
+
+  const orderedIds: string[] = []
+  const used = new Set<string>()
+  for (const ch of oldChapters) {
+    if (ch.id && txtSet.has(ch.id) && !used.has(ch.id)) {
+      orderedIds.push(ch.id)
+      used.add(ch.id)
+    }
+  }
+  for (const id of [...txtSet].sort((a, b) => a.localeCompare(b))) {
+    if (!used.has(id)) {
+      orderedIds.push(id)
+      used.add(id)
+    }
+  }
+
+  type Fetched = { id: string; body: string; old: OSSChapterMeta | undefined }
+  const fetched: Fetched[] = []
+  for (const id of orderedIds) {
+    try {
+      const r = await client.get(`${prefix}chapters/${id}.txt`)
+      const body = r.content.toString('utf-8')
+      fetched.push({ id, body, old: oldById.get(id) })
+    } catch {
+      // 列表中有但读取失败则跳过
+    }
+  }
+
+  if (fetched.length === 0) {
+    return {
+      ok: false,
+      error: '未能读取任何章节正文',
+      chapterCount: 0,
+      totalWordCount: 0,
+    }
+  }
+
+  const rows: OSSChapterMeta[] = fetched.map((f, i) => {
+    const wc = countWordsFromText(f.body)
+    const prev = f.old
+    const placeholderTitle = !prev?.title?.trim() || prev.title === '新章节' || prev.title === '（无标题）'
+    const title = placeholderTitle ? guessChapterTitleFromPlainText(f.body, i) : prev!.title
+    return {
+      id: f.id,
+      title,
+      chapterNumber: i + 1,
+      wordCount: wc,
+      order: i,
+      isPublished: prev?.isPublished ?? true,
+      createdAt: prev?.createdAt || novelCreatedAt,
+      updatedAt: now,
+    }
+  })
+
+  const totalWordCount = sumWordCountsFromChapterIndex(rows)
+
+  if (options?.dryRun) {
+    return {
+      ok: true,
+      chapterCount: rows.length,
+      totalWordCount,
+      preview: rows.slice(0, 5),
+    }
+  }
+
+  await runChapterIndexMutation(novelId, async () => {
+    await replaceChaptersJsonUnsafe(novelId, rows)
+    await updateNovelMeta(novelId, { wordCount: totalWordCount })
+  })
+
+  return { ok: true, chapterCount: rows.length, totalWordCount }
 }
 
 /**
@@ -719,52 +913,47 @@ export async function updateChapterInIndex(
   chapterId: string,
   updates: Partial<OSSChapterMeta>
 ): Promise<void> {
-  const client = getOSSClient()
-  const indexPath = `${NOVEL_PREFIX}/${novelId}/chapters.json`
-  const now = new Date().toISOString()
-  
-  // 读取现有索引
-  let chapters: OSSChapterMeta[] = []
-  try {
-    const result = await client.get(indexPath)
-    chapters = parseChaptersIndexFromOssBody(result.content)
-  } catch {
-    // 索引不存在
-  }
-  
-  // 查找或添加章节
-  const existingIndex = chapters.findIndex(ch => ch.id === chapterId)
-  if (existingIndex >= 0) {
-    chapters[existingIndex] = {
-      ...chapters[existingIndex],
-      ...updates,
-      updatedAt: now
+  return runChapterIndexMutation(novelId, async () => {
+    const client = getOSSClient()
+    const indexPath = `${NOVEL_PREFIX}/${novelId}/chapters.json`
+    const now = new Date().toISOString()
+
+    let chapters: OSSChapterMeta[] = []
+    try {
+      const result = await client.get(indexPath)
+      chapters = parseChaptersIndexFromOssBody(result.content)
+    } catch {
+      // 索引不存在
     }
-  } else {
-    chapters.push({
-      id: chapterId,
-      title: updates.title || '新章节',
-      chapterNumber: updates.chapterNumber,
-      wordCount: updates.wordCount || 0,
-      order: updates.order ?? chapters.length,
-      isPublished: updates.isPublished ?? false,
-      createdAt: now,
-      updatedAt: now
-    })
-  }
-  
-  // 按顺序排序
-  chapters.sort((a, b) => a.order - b.order)
-  
-  // 保存索引
-  await client.put(indexPath, Buffer.from(JSON.stringify(chapters, null, 2), 'utf-8'))
+
+    const existingIndex = chapters.findIndex((ch) => ch.id === chapterId)
+    if (existingIndex >= 0) {
+      chapters[existingIndex] = {
+        ...chapters[existingIndex],
+        ...updates,
+        updatedAt: now,
+      }
+    } else {
+      chapters.push({
+        id: chapterId,
+        title: updates.title || '新章节',
+        chapterNumber: updates.chapterNumber,
+        wordCount: updates.wordCount || 0,
+        order: updates.order ?? chapters.length,
+        isPublished: updates.isPublished ?? false,
+        createdAt: now,
+        updatedAt: now,
+      })
+    }
+
+    chapters.sort((a, b) => a.order - b.order)
+    await replaceChaptersJsonUnsafe(novelId, chapters)
+  })
 }
 
-/** 整体替换 chapters.json（内部工具 / 归一化迁移） */
+/** 整体替换 chapters.json（内部工具 / 归一化迁移；与单章更新串行） */
 export async function replaceChaptersJson(novelId: string, chapters: OSSChapterMeta[]): Promise<void> {
-  const client = getOSSClient()
-  const indexPath = `${NOVEL_PREFIX}/${novelId}/chapters.json`
-  await client.put(indexPath, Buffer.from(JSON.stringify(chapters, null, 2), 'utf-8'))
+  await runChapterIndexMutation(novelId, () => replaceChaptersJsonUnsafe(novelId, chapters))
 }
 
 export type RepairChapterSequenceResult = {
@@ -780,47 +969,49 @@ export type RepairChapterSequenceResult = {
 export async function repairChapterSequenceToMatchReadingOrder(
   novelId: string
 ): Promise<RepairChapterSequenceResult> {
-  const meta = await getNovelMetaFromOSS(novelId)
-  if (!meta?.chapters.length) {
-    return { ok: false, error: '无章节索引或无法读取 OSS', updatedCount: 0 }
-  }
+  return runChapterIndexMutation(novelId, async () => {
+    const meta = await getNovelMetaFromOSS(novelId)
+    if (!meta?.chapters.length) {
+      return { ok: false, error: '无章节索引或无法读取 OSS', updatedCount: 0 }
+    }
 
-  const chapters = [...meta.chapters]
-  const orderCount = new Map<number, number>()
-  for (const ch of chapters) {
-    const o = ch.order ?? 0
-    orderCount.set(o, (orderCount.get(o) ?? 0) + 1)
-  }
-  for (const [, n] of orderCount) {
-    if (n > 1) {
-      return {
-        ok: false,
-        error: '存在相同 order 的多章，请先使用「删除重复」处理后再修复章号',
-        updatedCount: 0,
+    const chapters = [...meta.chapters]
+    const orderCount = new Map<number, number>()
+    for (const ch of chapters) {
+      const o = ch.order ?? 0
+      orderCount.set(o, (orderCount.get(o) ?? 0) + 1)
+    }
+    for (const [, n] of orderCount) {
+      if (n > 1) {
+        return {
+          ok: false,
+          error: '存在相同 order 的多章，请先使用「删除重复」处理后再修复章号',
+          updatedCount: 0,
+        }
       }
     }
-  }
 
-  chapters.sort((a, b) => {
-    if ((a.order ?? 0) !== (b.order ?? 0)) return (a.order ?? 0) - (b.order ?? 0)
-    return a.id.localeCompare(b.id)
+    chapters.sort((a, b) => {
+      if ((a.order ?? 0) !== (b.order ?? 0)) return (a.order ?? 0) - (b.order ?? 0)
+      return a.id.localeCompare(b.id)
+    })
+
+    const now = new Date().toISOString()
+    const next: OSSChapterMeta[] = chapters.map((ch, i) => ({
+      ...ch,
+      order: i,
+      chapterNumber: i + 1,
+      title: stripLegacyChapterPrefixFromTitle(ch.title),
+      updatedAt: now,
+    }))
+
+    await replaceChaptersJsonUnsafe(novelId, next)
+
+    const total = sumWordCountsFromChapterIndex(next)
+    await updateNovelMeta(novelId, { wordCount: total })
+
+    return { ok: true, updatedCount: next.length }
   })
-
-  const now = new Date().toISOString()
-  const next: OSSChapterMeta[] = chapters.map((ch, i) => ({
-    ...ch,
-    order: i,
-    chapterNumber: i + 1,
-    title: stripLegacyChapterPrefixFromTitle(ch.title),
-    updatedAt: now,
-  }))
-
-  await replaceChaptersJson(novelId, next)
-
-  const total = sumWordCountsFromChapterIndex(next)
-  await updateNovelMeta(novelId, { wordCount: total })
-
-  return { ok: true, updatedCount: next.length }
 }
 
 /**
@@ -830,14 +1021,16 @@ export async function normalizeAndPersistChapterMeta(novelId: string): Promise<{
   count: number
   changed: boolean
 }> {
-  const meta = await getNovelMetaFromOSS(novelId)
-  if (!meta?.chapters.length) return { count: 0, changed: false }
-  const before = JSON.stringify(meta.chapters)
-  const next = normalizeChapterIndexEntries(meta.chapters)
-  const after = JSON.stringify(next)
-  const changed = before !== after
-  if (changed) await replaceChaptersJson(novelId, next)
-  return { count: next.length, changed }
+  return runChapterIndexMutation(novelId, async () => {
+    const meta = await getNovelMetaFromOSS(novelId)
+    if (!meta?.chapters.length) return { count: 0, changed: false }
+    const before = JSON.stringify(meta.chapters)
+    const next = normalizeChapterIndexEntries(meta.chapters)
+    const after = JSON.stringify(next)
+    const changed = before !== after
+    if (changed) await replaceChaptersJsonUnsafe(novelId, next)
+    return { count: next.length, changed }
+  })
 }
 
 /**
@@ -847,34 +1040,30 @@ export async function removeChapterFromIndex(
   novelId: string,
   chapterId: string
 ): Promise<void> {
-  const client = getOSSClient()
-  const indexPath = `${NOVEL_PREFIX}/${novelId}/chapters.json`
-  
-  // 读取现有索引
-  let chapters: OSSChapterMeta[] = []
-  try {
-    const result = await client.get(indexPath)
-    chapters = parseChaptersIndexFromOssBody(result.content)
-  } catch {
-    return
-  }
-  
-  // 过滤掉要删除的章节
-  chapters = chapters.filter(ch => ch.id !== chapterId)
-  
-  // 重新排序
-  chapters.sort((a, b) => a.order - b.order)
-  chapters = chapters.map((ch, i) => ({ ...ch, order: i }))
-  
-  // 保存索引
-  await client.put(indexPath, Buffer.from(JSON.stringify(chapters, null, 2), 'utf-8'))
-  
-  // 删除章节内容文件
-  try {
-    await client.delete(`${NOVEL_PREFIX}/${novelId}/chapters/${chapterId}.txt`)
-  } catch {
-    // 文件可能不存在
-  }
+  await runChapterIndexMutation(novelId, async () => {
+    const client = getOSSClient()
+    const indexPath = `${NOVEL_PREFIX}/${novelId}/chapters.json`
+
+    let chapters: OSSChapterMeta[] = []
+    try {
+      const result = await client.get(indexPath)
+      chapters = parseChaptersIndexFromOssBody(result.content)
+    } catch {
+      return
+    }
+
+    chapters = chapters.filter((ch) => ch.id !== chapterId)
+    chapters.sort((a, b) => a.order - b.order)
+    chapters = chapters.map((ch, i) => ({ ...ch, order: i }))
+
+    await replaceChaptersJsonUnsafe(novelId, chapters)
+
+    try {
+      await client.delete(`${NOVEL_PREFIX}/${novelId}/chapters/${chapterId}.txt`)
+    } catch {
+      // 文件可能不存在
+    }
+  })
 }
 
 /** chapters.json 索引条数 vs novels/{id}/chapters/*.txt 文件数 对照报告 */
@@ -1140,6 +1329,68 @@ export async function deleteOrphanChapterTxtFilesForAllNovels(
     results.push(await deleteOrphanChapterTxtFiles(m.id, options))
   }
   return { results }
+}
+
+export type ClearAllChaptersFromNovelResult = {
+  ok: boolean
+  error?: string
+  /** 已从 OSS 删除的 chapters/*.txt 数量 */
+  deletedTxtCount: number
+}
+
+/**
+ * 清空某书在 OSS 上的全部章节：写入空 chapters.json、novel.json 字数归零，并删除 chapters/ 下所有 .txt。
+ * 不删除 novel.json / 简介 / 大纲 / 角色等；与 {@link deleteNovelFromOSS} 不同。
+ */
+export async function clearAllChaptersFromNovelOSS(
+  novelId: string
+): Promise<ClearAllChaptersFromNovelResult> {
+  const client = getOSSClient()
+  const chapterPrefix = `${NOVEL_PREFIX}/${novelId}/chapters/`
+
+  try {
+    await runChapterIndexMutation(novelId, async () => {
+      await replaceChaptersJsonUnsafe(novelId, [])
+      await updateNovelMeta(novelId, { wordCount: 0 })
+    })
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      deletedTxtCount: 0,
+    }
+  }
+
+  let keys: string[] = []
+  try {
+    const objects = await listAllObjects(client, chapterPrefix)
+    keys = objects.map((o) => o.name).filter((name) => name.endsWith('.txt'))
+  } catch (e) {
+    return {
+      ok: false,
+      error: `列出章节文件失败: ${e instanceof Error ? e.message : String(e)}`,
+      deletedTxtCount: 0,
+    }
+  }
+
+  if (keys.length === 0) {
+    return { ok: true, deletedTxtCount: 0 }
+  }
+
+  try {
+    for (let i = 0; i < keys.length; i += 1000) {
+      const batch = keys.slice(i, i + 1000)
+      await client.deleteMulti(batch)
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      error: `删除章节正文失败: ${e instanceof Error ? e.message : String(e)}。索引已清空，可稍后重试或检查 OSS 权限`,
+      deletedTxtCount: 0,
+    }
+  }
+
+  return { ok: true, deletedTxtCount: keys.length }
 }
 
 /**

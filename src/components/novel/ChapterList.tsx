@@ -111,12 +111,12 @@ function EditorChapterListInner({
       )}
       {variant === 'sheet' ? (
         <ScrollArea className="h-[60vh]">
-          <div className="space-y-1 px-1">{rows.length ? rows : empty}</div>
+          <div className="space-y-1 px-1 pb-6">{rows.length ? rows : empty}</div>
         </ScrollArea>
       ) : (
-        /* 桌面侧栏：滚动由 page 侧栏内层 div 承担；此处仅占满宽度、随内容增高 */
+        /* 桌面侧栏：滚动由 page 侧栏内层 div 承担；底部多留空，避免最后一行贴边/被裁切 */
         <div className="w-full min-w-0">
-          <div className="space-y-1 px-2 pb-2 pr-1">{rows.length ? rows : empty}</div>
+          <div className="space-y-1 px-2 pr-1 pb-6 pt-1">{rows.length ? rows : empty}</div>
         </div>
       )}
     </div>

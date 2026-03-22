@@ -9,6 +9,7 @@
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
+    "ci:release": "npm run lint && npm run build",
     "verify:oss-chapters": "node scripts/oss-verify-chapter-index-vs-txt.js",
     "clean:oss-orphan-chapters": "node scripts/oss-delete-orphan-chapter-txt.js",
     "db:push": "prisma db push",

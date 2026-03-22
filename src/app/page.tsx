@@ -40,7 +40,9 @@ import {
   AlertCircle,
   SearchCheck,
   Download,
-  Wrench
+  Wrench,
+  RefreshCw,
+  Eraser
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -223,6 +225,7 @@ export default function NovelWriterApp() {
   const [chapterCheckLoading, setChapterCheckLoading] = useState(false)
   const [chapterCheckFilling, setChapterCheckFilling] = useState(false)
   const [chapterRepairSequenceLoading, setChapterRepairSequenceLoading] = useState(false)
+  const [chapterRebuildIndexLoading, setChapterRebuildIndexLoading] = useState(false)
   const [duplicateSelections, setDuplicateSelections] = useState<Record<string, string>>({}) // order -> id to keep
   
   // Edit novel states
@@ -399,6 +402,41 @@ export default function NovelWriterApp() {
   }
 
   // Delete novel
+  /** 清空 OSS 章节索引与全部 .txt，保留小说元信息；并清除本地修订历史 */
+  const handleClearAllChapters = async (novel: { id: string; title: string }) => {
+    const msg =
+      `将删除《${novel.title}》在云端（OSS）的全部章节正文与目录索引（chapters.json），全书字数归零，并清除本书的章节修订历史。\n\n` +
+      `小说标题、简介、大纲、角色等仍会保留。\n\n此操作不可恢复，确定吗？`
+    if (!confirm(msg)) return
+
+    try {
+      const res = await fetch(`/api/novels/${encodeURIComponent(novel.id)}/clear-chapters`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        toast({ title: data.error || '清空失败', variant: 'destructive' })
+        return
+      }
+      toast({ title: '章节已全部清空', description: data.message })
+      const novelsRes = await fetch('/api/novels')
+      const novelsData = await novelsRes.json()
+      if (novelsData.success) setNovels(novelsData.novels)
+      if (currentNovel?.id === novel.id) {
+        stopTTS()
+        setCurrentNovel((prev) =>
+          prev ? { ...prev, chapters: [], wordCount: 0, updatedAt: new Date().toISOString() } : null
+        )
+        setCurrentChapter(null)
+        setEditingContent('')
+      }
+    } catch {
+      toast({ title: '清空失败', variant: 'destructive' })
+    }
+  }
+
   const handleDeleteNovel = async (novelId: string) => {
     if (!confirm('确定要删除这本小说吗？所有章节也将被删除。')) return
     
@@ -1523,7 +1561,8 @@ export default function NovelWriterApp() {
 
   /** 按当前 order 将 chapterNumber 重排为 1..n，并剥离标题中的旧「第N章」前缀（仅改 chapters.json） */
   const handleRepairChapterSequence = async () => {
-    if (!chapterCheckNovel || (chapterCheckResult?.duplicates?.length ?? 0) > 0) return
+    if (!chapterCheckNovel) return
+    if (chapterCheckResult && chapterCheckResult.duplicates.length > 0) return
     setChapterRepairSequenceLoading(true)
     try {
       const res = await fetch('/api/chapters/repair-sequence', {
@@ -1559,6 +1598,57 @@ export default function NovelWriterApp() {
       toast({ title: '修复失败', variant: 'destructive' })
     } finally {
       setChapterRepairSequenceLoading(false)
+    }
+  }
+
+  /** 按 OSS 上 chapters/*.txt 全量重建 chapters.json（与「修复章号」不同：会扫盘、可补孤儿章、去掉无 .txt 的索引行） */
+  const handleRebuildChapterIndexFromTxt = async () => {
+    if (!chapterCheckNovel) return
+    if (
+      !window.confirm(
+        '将根据 OSS 上的 chapters/*.txt 全量重写 chapters.json。\n' +
+          '· 仍保留旧索引中的阅读顺序（仅针对仍存在的章节 id）\n' +
+          '· 索引里有但无对应 .txt 的条目将被删除\n' +
+          '是否继续？'
+      )
+    ) {
+      return
+    }
+    setChapterRebuildIndexLoading(true)
+    try {
+      const res = await fetch('/api/oss/rebuild-chapter-index', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ novelId: chapterCheckNovel.id, confirm: true }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        toast({ title: data.error || '重建失败', variant: 'destructive' })
+        return
+      }
+      toast({
+        title: '索引已从正文重建',
+        description: data.message,
+      })
+      const novelsRes = await fetch('/api/novels')
+      const novelsData = await novelsRes.json()
+      if (novelsData.success) setNovels(novelsData.novels)
+      if (currentNovel?.id === chapterCheckNovel.id) {
+        const detailRes = await fetch(`/api/novels/${chapterCheckNovel.id}`)
+        const detailData = await detailRes.json()
+        if (detailData.success) {
+          setCurrentNovel(detailData.novel)
+          if (currentChapter) {
+            const updated = detailData.novel.chapters.find((c: Chapter) => c.id === currentChapter.id)
+            if (updated) setCurrentChapter(updated)
+          }
+        }
+      }
+      if (chapterCheckResult) await handleChapterCheck()
+    } catch {
+      toast({ title: '重建失败', variant: 'destructive' })
+    } finally {
+      setChapterRebuildIndexLoading(false)
     }
   }
 
@@ -1737,6 +1827,24 @@ export default function NovelWriterApp() {
                     <ChevronLeft className="w-5 h-5" />
                   </Button>
                 )}
+                {isMobile && currentNovel && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" className="shrink-0 -ml-1" aria-label="小说更多">
+                        <MoreVertical className="w-5 h-5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem
+                        className="text-amber-700 focus:text-amber-800 dark:text-amber-400"
+                        onClick={() => handleClearAllChapters(currentNovel)}
+                      >
+                        <Eraser className="w-4 h-4 mr-2" />
+                        一键清空章节
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
                 <div className="flex-1 min-w-0">
                   <h1 className="font-semibold truncate">{currentNovel?.title}</h1>
                   <p className="text-xs text-muted-foreground truncate">
@@ -1772,6 +1880,24 @@ export default function NovelWriterApp() {
                     <Download className="w-4 h-4 mr-1" />
                     导出
                   </Button>
+                )}
+                {!isMobile && currentNovel && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" size="icon" className="shrink-0" aria-label="小说更多">
+                        <MoreVertical className="w-4 h-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        className="text-amber-700 focus:text-amber-800 dark:text-amber-400"
+                        onClick={() => handleClearAllChapters(currentNovel)}
+                      >
+                        <Eraser className="w-4 h-4 mr-2" />
+                        一键清空章节
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 )}
               </div>
             </>
@@ -2148,7 +2274,9 @@ export default function NovelWriterApp() {
                     章节检测
                   </DialogTitle>
                   <DialogDescription>
-                    检测重复/缺失（按排序位 order），以及按顺序是否从「第1章」连续编号；支持删除重复、一键补全缺失
+                    检测重复/缺失（按排序位 order），以及按顺序是否从「第1章」连续编号；支持删除重复、一键补全缺失。
+                    「一键修复章号与顺序」会按当前 order 重排第 1…n 章并去掉标题里的「第N章」前缀（不改正文），智能生成后目录乱时可使用。
+                    若 chapters.json 丢失/严重不全，但 OSS 上仍有各章 .txt，请用下方「从 OSS 正文重建索引」。
                   </DialogDescription>
                 </DialogHeader>
                 <div className="flex-1 overflow-y-auto space-y-4 py-4">
@@ -2163,11 +2291,50 @@ export default function NovelWriterApp() {
                     </Card>
                   )}
                   {!chapterCheckResult ? (
-                    <div className="flex justify-center py-8">
+                    <div className="flex flex-col items-center gap-4 py-8">
                       <Button onClick={handleChapterCheck} disabled={chapterCheckLoading}>
                         {chapterCheckLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <SearchCheck className="w-4 h-4 mr-2" />}
                         开始检测
                       </Button>
+                      <div className="w-full max-w-sm rounded-lg border bg-muted/30 p-3 text-center space-y-2">
+                        <p className="text-xs text-muted-foreground">
+                          已知章号/顺序乱了，也可不检测直接按 OSS 索引修复（存在<strong>重复 order</strong>时会失败，请先检测并删重）
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="w-full"
+                          disabled={chapterRepairSequenceLoading}
+                          onClick={handleRepairChapterSequence}
+                        >
+                          {chapterRepairSequenceLoading ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Wrench className="mr-2 h-4 w-4" />
+                          )}
+                          一键修复章号与顺序
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="w-full border-amber-300 text-amber-900 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:bg-amber-950/40"
+                          disabled={chapterRebuildIndexLoading}
+                          onClick={handleRebuildChapterIndexFromTxt}
+                        >
+                          {chapterRebuildIndexLoading ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          从 OSS 正文重建索引
+                        </Button>
+                        <p className="text-[11px] text-muted-foreground leading-snug">
+                          按 <code className="text-[10px]">chapters/*.txt</code> 重写整份{' '}
+                          <code className="text-[10px]">chapters.json</code> 并同步全书字数；无 .txt 的旧索引行会被移除。
+                        </p>
+                      </div>
                     </div>
                   ) : (
                     <div className="space-y-4">
@@ -2233,34 +2400,9 @@ export default function NovelWriterApp() {
                                 …共 {chapterCheckResult.chapterNumberIssues.mismatches.length} 条
                               </p>
                             )}
-                            <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:flex-wrap sm:items-center">
-                              <Button
-                                type="button"
-                                variant="default"
-                                size="sm"
-                                className="bg-amber-600 hover:bg-amber-700 dark:bg-amber-700 dark:hover:bg-amber-600"
-                                disabled={
-                                  chapterRepairSequenceLoading ||
-                                  chapterCheckResult.duplicates.length > 0
-                                }
-                                title={
-                                  chapterCheckResult.duplicates.length > 0
-                                    ? '请先处理上方重复章节'
-                                    : undefined
-                                }
-                                onClick={handleRepairChapterSequence}
-                              >
-                                {chapterRepairSequenceLoading ? (
-                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Wrench className="mr-2 h-4 w-4" />
-                                )}
-                                一键修复章号与顺序
-                              </Button>
-                              <p className="text-xs text-muted-foreground">
-                                按当前列表顺序将第 1 条标为第 1 章…依次重排；标题里「第29章」等前缀会去掉，正文 .txt 不改。
-                              </p>
-                            </div>
+                            <p className="text-xs text-muted-foreground pt-1">
+                              请使用下方「一键修复章号与顺序」执行修复（需先处理完重复章节）。
+                            </p>
                           </div>
                         )}
                       {chapterCheckResult.gaps.length > 0 && (
@@ -2300,6 +2442,61 @@ export default function NovelWriterApp() {
                           </span>
                         </div>
                       )}
+                      {chapterCheckResult.duplicates.length === 0 && (
+                        <div className="rounded-lg border border-dashed p-3 space-y-2 bg-muted/20">
+                          <h4 className="text-sm font-medium flex items-center gap-2">
+                            <Wrench className="w-4 h-4" />
+                            一键修复章号与顺序
+                          </h4>
+                          <p className="text-xs text-muted-foreground">
+                            按 OSS 中 <code className="text-[10px]">order</code> 升序将{' '}
+                            <code className="text-[10px]">chapterNumber</code> 重排为 1…n、
+                            <code className="text-[10px]">order</code> 为 0…n−1，并去掉标题内「第N章」前缀；<strong>不修改</strong>{' '}
+                            <code className="text-[10px]">.txt</code> 正文。若存在相同 order 的多章，请先在上方处理重复。
+                          </p>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={chapterRepairSequenceLoading}
+                            onClick={handleRepairChapterSequence}
+                          >
+                            {chapterRepairSequenceLoading ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <Wrench className="mr-2 h-4 w-4" />
+                            )}
+                            执行修复
+                          </Button>
+                        </div>
+                      )}
+                      <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 space-y-2 dark:border-amber-900 dark:bg-amber-950/20">
+                        <h4 className="text-sm font-medium flex items-center gap-2 text-amber-900 dark:text-amber-100">
+                          <RefreshCw className="w-4 h-4" />
+                          从 OSS 正文重建索引
+                        </h4>
+                        <p className="text-xs text-muted-foreground">
+                          当 <code className="text-[10px]">chapters.json</code> 损坏或与{' '}
+                          <code className="text-[10px]">.txt</code> 严重不一致时，按桶内实际{' '}
+                          <code className="text-[10px]">chapters/*.txt</code> 全量重建索引并更新{' '}
+                          <code className="text-[10px]">novel.json</code> 字数。尽量保留旧索引中的章节顺序；仅正文有的章会接在后面。
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="border-amber-400 dark:border-amber-700"
+                          disabled={chapterRebuildIndexLoading}
+                          onClick={handleRebuildChapterIndexFromTxt}
+                        >
+                          {chapterRebuildIndexLoading ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          重建索引
+                        </Button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -2379,6 +2576,16 @@ export default function NovelWriterApp() {
                             >
                               <Download className="w-4 h-4 mr-2 text-green-500" />
                               导出小说
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="text-amber-700 focus:text-amber-800 dark:text-amber-400"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                handleClearAllChapters(novel)
+                              }}
+                            >
+                              <Eraser className="w-4 h-4 mr-2" />
+                              一键清空章节
                             </DropdownMenuItem>
                             <DropdownMenuItem 
                               onClick={(e) => {
@@ -2468,7 +2675,8 @@ export default function NovelWriterApp() {
                   </CardHeader>
                   {/* 外层 overflow-hidden + 内层滚动：h-0+flex-1+min-h-0 保证在 Windows/flex 下获得有限高度；overflow-y-scroll 始终预留滚动条轨道 */}
                   <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
-                    <div className="h-0 min-h-0 flex-1 overflow-y-scroll overflow-x-hidden overscroll-y-contain [scrollbar-gutter:stable] md:max-h-[calc(100dvh-13.5rem)]">
+                    {/* 高度仅由 flex(min-h-0) 约束，勿再套 100dvh-max-h，否则易高于卡片可视区被 overflow-hidden 裁切，最后一章滚不到 */}
+                    <div className="h-0 min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-y-contain [scrollbar-gutter:stable]">
                       <EditorChapterList
                         variant="sidebar"
                         hideHeaderRow

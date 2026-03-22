@@ -4,7 +4,6 @@ import ZAI from 'z-ai-web-dev-sdk'
 // In development, Next.js hot reloads modules, but we want to reuse the same instance
 
 declare global {
-  // eslint-disable-next-line no-var
   var zaiInstance: Awaited<ReturnType<typeof ZAI.create>> | undefined
 }
 

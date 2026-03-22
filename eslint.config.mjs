@@ -44,7 +44,17 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills"]
+  ignores: [
+    "node_modules/**",
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+    "examples/**",
+    "skills",
+    /** Node 维护脚本为 CommonJS + require，不参与与 App 相同的 TS 规则 */
+    "scripts/**",
+  ],
 }];
 
 export default eslintConfig;

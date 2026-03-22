@@ -1,5 +1,7 @@
 /**
  * 根据 OSS 上已有的 chapters/*.txt 重建并上传 chapters.json（并可选更新 novel.json 总字数）
+ * 应用内等价能力：POST /api/oss/rebuild-chapter-index（body: { novelId, confirm: true }），
+ * 服务端用 countWordsFromText 计字数；本脚本仍用 body.length，仅作本地应急。
  *
  * 用法:
  *   node scripts/repair-oss-chapters-json.js [novelId] [--dry-run]

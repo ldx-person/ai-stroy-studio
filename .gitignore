@@ -33,5 +33,11 @@ public/fonts/*.otf
 public/fonts/*.woff
 public/fonts/*.woff2
 .env
+.env.local
+.env.*.local
+
+# 本地 SQLite（修订历史等），勿提交个人数据
+prisma/db/*.db
+prisma/db/*.db-journal
 tsconfig.tsbuildinfo
 dev.log
